@@ -18,7 +18,9 @@ public final class NativeCompressor {
 
     public static void loadLibrary(String path) {
         if (loaded) return;
-        System.load(path);
+        /* System.load() requires an absolute path — resolve relative paths */
+        java.io.File f = new java.io.File(path);
+        System.load(f.getAbsolutePath());
         loaded = true;
     }
 
