@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Premain-Class: com.texcompress.TextureCompressAgent
+Agent-Class: com.texcompress.TextureCompressAgent
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true
