@@ -24,15 +24,23 @@
 #include <string.h>
 #include <dlfcn.h>
 
-/* Grab glGetString at runtime from whatever GL library is already loaded */
+/* Grab GL function pointers at runtime from whatever GL/GLES lib is loaded */
 typedef const unsigned char *(*PFNGLGETSTRINGPROC)(unsigned int);
-static PFNGLGETSTRINGPROC tc_glGetString = NULL;
+typedef const unsigned char *(*PFNGLGETSTRINGIPROC)(unsigned int, unsigned int);
+typedef void (*PFNGLGETINTEGERVPROC)(unsigned int, int *);
+
+static PFNGLGETSTRINGPROC   tc_glGetString   = NULL;
+static PFNGLGETSTRINGIPROC  tc_glGetStringi  = NULL;
+static PFNGLGETINTEGERVPROC tc_glGetIntegerv = NULL;
 
 static void tc_init_gl(void) {
     if (tc_glGetString) return;
-    /* libGL is already mapped into the process by the time any texture loads */
+    /* The process already has libGL or libGLESv2 mapped in */
     void *gl = dlopen(NULL, RTLD_LAZY);
-    if (gl) tc_glGetString = (PFNGLGETSTRINGPROC)dlsym(gl, "glGetString");
+    if (!gl) return;
+    tc_glGetString   = (PFNGLGETSTRINGPROC)  dlsym(gl, "glGetString");
+    tc_glGetStringi  = (PFNGLGETSTRINGIPROC) dlsym(gl, "glGetStringi");
+    tc_glGetIntegerv = (PFNGLGETINTEGERVPROC)dlsym(gl, "glGetIntegerv");
 }
 
 /* --------------------------------------------------------------------------
@@ -573,20 +581,52 @@ static void compress_etc2_rgba(const unsigned char *src, int w, int h,
  * Format detection
  * ========================================================================== */
 
-static int detect_format(int want_rgba) {
-    const char *ext;
-    tc_init_gl();
-    if (!tc_glGetString) return TC_FORMAT_NONE;
-    ext = (const char *)tc_glGetString(GL_EXTENSIONS);
-    if (!ext) return TC_FORMAT_NONE;
+/* Returns 1 if the named extension is present, searching both the monolithic
+ * GL_EXTENSIONS string (desktop / GLES2) and the indexed form (GLES3 core). */
+static int tc_has_extension(const char *name) {
+    /* Indexed form — mandatory in GLES3 core profile */
+    if (tc_glGetStringi && tc_glGetIntegerv) {
+        int n = 0;
+        unsigned int i;
+        tc_glGetIntegerv(0x821D /* GL_NUM_EXTENSIONS */, &n);
+        for (i = 0; i < (unsigned int)n; i++) {
+            const char *e = (const char *)tc_glGetStringi(GL_EXTENSIONS, i);
+            if (e && strcmp(e, name) == 0) return 1;
+        }
+    }
+    /* Monolithic string — desktop GL and GLES2 */
+    if (tc_glGetString) {
+        const char *all = (const char *)tc_glGetString(GL_EXTENSIONS);
+        if (all && strstr(all, name)) return 1;
+    }
+    return 0;
+}
 
-    if (strstr(ext, "GL_EXT_texture_compression_s3tc") ||
-        strstr(ext, "GL_NV_texture_compression_s3tc")) {
+/* Returns 1 if the context is OpenGL ES 3.x (ETC2 mandatory, no extension needed) */
+static int tc_is_gles3(void) {
+    if (!tc_glGetString) return 0;
+    const char *ver = (const char *)tc_glGetString(0x1F02 /* GL_VERSION */);
+    /* GLES version strings start with "OpenGL ES 3" */
+    return ver && strstr(ver, "OpenGL ES 3") != NULL;
+}
+
+static int detect_format(int want_rgba) {
+    tc_init_gl();
+
+    /* On a GLES3 context ETC2 is always available — no extension needed */
+    if (tc_is_gles3()) {
+        return want_rgba ? TC_GL_COMPRESSED_RGBA8_ETC2_EAC
+                         : TC_GL_COMPRESSED_RGB8_ETC2;
+    }
+
+    /* Desktop GL: prefer S3TC (DXT), fall back to ETC2 via compatibility ext */
+    if (tc_has_extension("GL_EXT_texture_compression_s3tc") ||
+        tc_has_extension("GL_NV_texture_compression_s3tc")) {
         return want_rgba ? TC_GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
                          : TC_GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
     }
-    if (strstr(ext, "GL_ARB_ES3_compatibility")        ||
-        strstr(ext, "GL_OES_compressed_ETC2_RGB8_texture")) {
+    if (tc_has_extension("GL_ARB_ES3_compatibility") ||
+        tc_has_extension("GL_OES_compressed_ETC2_RGB8_texture")) {
         return want_rgba ? TC_GL_COMPRESSED_RGBA8_ETC2_EAC
                          : TC_GL_COMPRESSED_RGB8_ETC2;
     }
