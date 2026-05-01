@@ -97,6 +97,20 @@ public class TextureCompressAgent {
         if (compFmt == NativeCompressor.NONE) return false;
 
         ByteBuffer src = (ByteBuffer) pixels;
+
+        /* ETC2 EAC alpha blocks cannot faithfully represent bimodal alpha
+         * (pixels that are either 0 or 255 with nothing in between), which is
+         * exactly what font/glyph atlas textures contain.  EAC's maximum
+         * representable range per block is ~54 decoded steps, so a block
+         * spanning 0–255 gets encoded as ~99–153 — making glyphs look
+         * semi-transparent.  Skip ETC2 RGBA for these textures and let the
+         * original glTexImage2D call through unmodified.
+         * DXT5 (desktop) uses BC4 which has a 6-interpolant mode that
+         * explicitly includes 0 and 255, so it handles bimodal alpha fine. */
+        if (compFmt == NativeCompressor.GL_COMPRESSED_RGBA8_ETC2_EAC
+                && isBimodalAlpha(src, width * height)) {
+            return false;
+        }
         int expectedBytes = width * height * (hasAlpha ? 4 : 3);
         if (src.remaining() < expectedBytes) return false;
 
@@ -123,6 +137,22 @@ public class TextureCompressAgent {
         ByteBuffer dst = ByteBuffer.allocateDirect(compSize);
         NativeCompressor.nCompress(src, dst, w, h, compFmt);
         callCompressedTexImage2D(target, level, compFmt, width, height, border, compSize, dst);
+        return true;
+    }
+
+    /**
+     * Returns true if every sampled alpha value is exactly 0 or 255.
+     * Samples ~128 evenly-spaced pixels so it stays O(1) regardless of size.
+     * Font atlas textures have bimodal alpha; card art / sprites have smooth
+     * gradients at edges and will return false.
+     */
+    private static boolean isBimodalAlpha(ByteBuffer src, int pixelCount) {
+        int alphaOffset = src.position() + 3; // first alpha byte in RGBA stream
+        int step = Math.max(4, pixelCount >> 7); // sample ~128 pixels
+        for (int i = 0; i < pixelCount; i += step) {
+            int a = src.get(alphaOffset + i * 4) & 0xFF;
+            if (a != 0 && a != 255) return false;
+        }
         return true;
     }
 

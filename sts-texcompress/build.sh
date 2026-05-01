@@ -35,9 +35,15 @@ if [ ! -x "$JAVAC" ]; then
 fi
 echo "    Using JDK: $JAVA_HOME"
 
-# ASM jar — search common locations
-ASM_JAR=""
+# ASM jar — honour explicit env var, then search common locations
+if [ -n "$ASM_JAR" ] && [ ! -f "$ASM_JAR" ]; then
+    echo "WARNING: ASM_JAR env var set but file not found: $ASM_JAR"
+    ASM_JAR=""
+fi
+if [ -z "$ASM_JAR" ]; then
 for candidate in \
+    /opt/gradle-*/lib/asm-[0-9]*.jar \
+    /opt/apache-maven-*/lib/asm-[0-9]*.jar \
     ~/snap/steam/common/.local/share/Steam/steamapps/common/SlayTheSpire/lib/asm-all*.jar \
     ~/snap/steam/common/.local/share/Steam/steamapps/common/SlayTheSpire/lib/asm*.jar \
     ~/.steam/steam/steamapps/common/SlayTheSpire/lib/asm-all*.jar \
@@ -49,6 +55,7 @@ for candidate in \
         break
     fi
 done
+fi
 
 if [ -z "$ASM_JAR" ]; then
     echo "ERROR: ASM jar not found. Install with: sudo apt install libasm-java"
