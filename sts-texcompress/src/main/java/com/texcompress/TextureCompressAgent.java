@@ -98,17 +98,23 @@ public class TextureCompressAgent {
 
         ByteBuffer src = (ByteBuffer) pixels;
 
-        /* ETC2 EAC alpha blocks cannot faithfully represent bimodal alpha
-         * (pixels that are either 0 or 255 with nothing in between), which is
-         * exactly what font/glyph atlas textures contain.  EAC's maximum
-         * representable range per block is ~54 decoded steps, so a block
-         * spanning 0–255 gets encoded as ~99–153 — making glyphs look
-         * semi-transparent.  Skip ETC2 RGBA for these textures and let the
-         * original glTexImage2D call through unmodified.
+        /* ETC2 EAC alpha blocks can only cover ~54 decoded values per block
+         * (max modifier span 29 × mult 15 ÷ 8).  Any 4×4 block whose alpha
+         * spans the full 0–255 range gets every pixel crushed to 99–153 with
+         * the midpoint-base heuristic — transparent backgrounds become 39%
+         * opaque, making font glyphs and UI unreadable.
+         *
+         * Font / glyph atlas textures are recognisable because the vast
+         * majority of their pixels are transparent background (alpha ≈ 0).
+         * Card art and sprites are mostly filled (high alpha), so a simple
+         * "mostly-transparent" sample distinguishes them.  Skip ETC2 RGBA
+         * for textures where ≥ 65 % of sampled pixels have alpha < 32.
+         *
          * DXT5 (desktop) uses BC4 which has a 6-interpolant mode that
-         * explicitly includes 0 and 255, so it handles bimodal alpha fine. */
+         * explicitly includes exact 0 and 255, so it handles font alpha fine
+         * and does not need this guard. */
         if (compFmt == NativeCompressor.GL_COMPRESSED_RGBA8_ETC2_EAC
-                && isBimodalAlpha(src, width * height)) {
+                && isMostlyTransparent(src, width * height)) {
             return false;
         }
         int expectedBytes = width * height * (hasAlpha ? 4 : 3);
@@ -141,19 +147,23 @@ public class TextureCompressAgent {
     }
 
     /**
-     * Returns true if every sampled alpha value is exactly 0 or 255.
+     * Returns true if ≥ 65 % of sampled alpha values are below 32.
      * Samples ~128 evenly-spaced pixels so it stays O(1) regardless of size.
-     * Font atlas textures have bimodal alpha; card art / sprites have smooth
-     * gradients at edges and will return false.
+     *
+     * Font / glyph atlases are mostly empty background (alpha ≈ 0) with
+     * small opaque glyph shapes.  Card art and sprites fill most of the
+     * texture area with high-alpha pixels.  This threshold reliably
+     * separates them without needing any per-texture metadata.
      */
-    private static boolean isBimodalAlpha(ByteBuffer src, int pixelCount) {
-        int alphaOffset = src.position() + 3; // first alpha byte in RGBA stream
+    private static boolean isMostlyTransparent(ByteBuffer src, int pixelCount) {
+        int alphaOffset = src.position() + 3;
         int step = Math.max(4, pixelCount >> 7); // sample ~128 pixels
+        int low = 0, total = 0;
         for (int i = 0; i < pixelCount; i += step) {
-            int a = src.get(alphaOffset + i * 4) & 0xFF;
-            if (a != 0 && a != 255) return false;
+            if ((src.get(alphaOffset + i * 4) & 0xFF) < 32) low++;
+            total++;
         }
-        return true;
+        return total > 0 && low * 100 / total >= 65;
     }
 
     private static void callCompressedTexImage2D(int target, int level, int internalFormat,
