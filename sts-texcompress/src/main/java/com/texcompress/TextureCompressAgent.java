@@ -99,22 +99,20 @@ public class TextureCompressAgent {
         ByteBuffer src = (ByteBuffer) pixels;
 
         /* ETC2 EAC alpha blocks can only cover ~54 decoded values per block
-         * (max modifier span 29 × mult 15 ÷ 8).  Any 4×4 block whose alpha
-         * spans the full 0–255 range gets every pixel crushed to 99–153 with
-         * the midpoint-base heuristic — transparent backgrounds become 39%
-         * opaque, making font glyphs and UI unreadable.
+         * (max modifier span 29 x mult 15 / 8). A 4x4 block whose alpha
+         * spans 0-255 (font edges, sprite borders, UI elements) gets every
+         * pixel crushed to a narrow mid-range (~99-153 with midpoint base).
+         * No choice of base / table / multiplier can cover the full range in
+         * one block -- it is a hard mathematical limit of the EAC format.
          *
-         * Font / glyph atlas textures are recognisable because the vast
-         * majority of their pixels are transparent background (alpha ≈ 0).
-         * Card art and sprites are mostly filled (high alpha), so a simple
-         * "mostly-transparent" sample distinguishes them.  Skip ETC2 RGBA
-         * for textures where ≥ 65 % of sampled pixels have alpha < 32.
+         * DXT5 (desktop GL) uses BC4 which has a 6-interpolant mode that
+         * explicitly includes exact 0 and 255 as endpoints, so it handles
+         * high-contrast alpha correctly. ETC2 RGBA8 / EAC does not.
          *
-         * DXT5 (desktop) uses BC4 which has a 6-interpolant mode that
-         * explicitly includes exact 0 and 255, so it handles font alpha fine
-         * and does not need this guard. */
-        if (compFmt == NativeCompressor.GL_COMPRESSED_RGBA8_ETC2_EAC
-                && isMostlyTransparent(src, width * height)) {
+         * Skip RGBA compression when using ETC2. RGB textures (backgrounds,
+         * environment art) still get compressed and provide meaningful VRAM
+         * savings. */
+        if (compFmt == NativeCompressor.GL_COMPRESSED_RGBA8_ETC2_EAC) {
             return false;
         }
         int expectedBytes = width * height * (hasAlpha ? 4 : 3);
@@ -144,26 +142,6 @@ public class TextureCompressAgent {
         NativeCompressor.nCompress(src, dst, w, h, compFmt);
         callCompressedTexImage2D(target, level, compFmt, width, height, border, compSize, dst);
         return true;
-    }
-
-    /**
-     * Returns true if ≥ 65 % of sampled alpha values are below 32.
-     * Samples ~128 evenly-spaced pixels so it stays O(1) regardless of size.
-     *
-     * Font / glyph atlases are mostly empty background (alpha ≈ 0) with
-     * small opaque glyph shapes.  Card art and sprites fill most of the
-     * texture area with high-alpha pixels.  This threshold reliably
-     * separates them without needing any per-texture metadata.
-     */
-    private static boolean isMostlyTransparent(ByteBuffer src, int pixelCount) {
-        int alphaOffset = src.position() + 3;
-        int step = Math.max(4, pixelCount >> 7); // sample ~128 pixels
-        int low = 0, total = 0;
-        for (int i = 0; i < pixelCount; i += step) {
-            if ((src.get(alphaOffset + i * 4) & 0xFF) < 32) low++;
-            total++;
-        }
-        return total > 0 && low * 100 / total >= 65;
     }
 
     private static void callCompressedTexImage2D(int target, int level, int internalFormat,
