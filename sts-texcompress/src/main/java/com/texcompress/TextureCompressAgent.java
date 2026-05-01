@@ -98,21 +98,16 @@ public class TextureCompressAgent {
 
         ByteBuffer src = (ByteBuffer) pixels;
 
-        /* ETC2 EAC alpha blocks can only cover ~54 decoded values per block
-         * (max modifier span 29 x mult 15 / 8). A 4x4 block whose alpha
-         * spans 0-255 (font edges, sprite borders, UI elements) gets every
-         * pixel crushed to a narrow mid-range (~99-153 with midpoint base).
-         * No choice of base / table / multiplier can cover the full range in
-         * one block -- it is a hard mathematical limit of the EAC format.
+        /* Skip all RGBA compression.
          *
-         * DXT5 (desktop GL) uses BC4 which has a 6-interpolant mode that
-         * explicitly includes exact 0 and 255 as endpoints, so it handles
-         * high-contrast alpha correctly. ETC2 RGBA8 / EAC does not.
+         * Font/glyph atlases, sprites, and UI elements all have high-contrast
+         * alpha channels (0 and 255 in the same 4x4 block). Neither DXT5/BC4
+         * nor ETC2/EAC produce acceptable quality for these in practice.
          *
-         * Skip RGBA compression when using ETC2. RGB textures (backgrounds,
-         * environment art) still get compressed and provide meaningful VRAM
-         * savings. */
-        if (compFmt == NativeCompressor.GL_COMPRESSED_RGBA8_ETC2_EAC) {
+         * Only GL_RGB textures (backgrounds, environment art) are compressed.
+         * They still deliver meaningful VRAM savings with DXT1 (6x) or
+         * ETC2 RGB8 (6x). */
+        if (hasAlpha) {
             return false;
         }
         int expectedBytes = width * height * (hasAlpha ? 4 : 3);
