@@ -47,9 +47,16 @@ javac -cp "$ASM_JAR" \
       src/main/java/com/texcompress/NativeCompressor.java \
       src/main/java/com/texcompress/TextureCompressAgent.java
 
-# ---------- 3. Package agent jar ----------
-echo "==> Packaging texcompress-agent.jar ..."
+# ---------- 3. Package fat agent jar (bundle ASM so it is self-contained) ----------
+echo "==> Packaging texcompress-agent.jar (fat jar, ASM bundled) ..."
 cp -r src/main/java/META-INF build/classes/
+
+# Extract ASM classes into the build directory so they get bundled
+mkdir -p build/asm-extract
+(cd build/asm-extract && jar xf "$ASM_JAR")
+# Copy only the org/objectweb/asm hierarchy — skip META-INF to avoid conflicts
+cp -rn build/asm-extract/org build/classes/ 2>/dev/null || true
+
 jar cfm texcompress-agent.jar build/classes/META-INF/MANIFEST.MF \
     -C build/classes .
 
@@ -60,16 +67,30 @@ echo "Files produced:"
 echo "  $(pwd)/libtexcompress.so"
 echo "  $(pwd)/texcompress-agent.jar"
 echo ""
+STS_DIR="$HOME/snap/steam/common/.local/share/Steam/steamapps/common/SlayTheSpire"
+if [ ! -d "$STS_DIR" ]; then
+    STS_DIR="$HOME/.steam/steam/steamapps/common/SlayTheSpire"
+fi
+
 echo "=== How to use with Slay the Spire ==="
 echo ""
-echo "1. In Steam, right-click Slay the Spire → Properties → Launch Options:"
+echo "Step 1 — Copy files into the game directory (required for snap Steam):"
+echo "  cp $(pwd)/libtexcompress.so   \"$STS_DIR/\""
+echo "  cp $(pwd)/texcompress-agent.jar \"$STS_DIR/\""
 echo ""
-echo '   For Linux:'
-echo '   java -javaagent:/PATH/TO/texcompress-agent.jar=native=/PATH/TO/libtexcompress.so %command%'
+echo "Step 2 — Launch with:"
+echo "  cd \"$STS_DIR\""
+echo "  LD_LIBRARY_PATH=/usr/lib/jvm/java-21-openjdk-amd64/lib:\$LD_LIBRARY_PATH \\"
+echo '  java \'
+echo '    -javaagent:$(pwd)/texcompress-agent.jar=native=$(pwd)/libtexcompress.so \'
+echo '    -jar ./desktop-1.0.jar'
 echo ""
-echo '   Or edit the steam_launch script and prepend those JVM flags.'
+echo "  OR add to Steam launch options (right-click → Properties):"
+echo "  LD_LIBRARY_PATH=/usr/lib/jvm/java-21-openjdk-amd64/lib:\$LD_LIBRARY_PATH"
+echo '  JAVA_TOOL_OPTIONS="-javaagent:%command%/texcompress-agent.jar=native=%command%/libtexcompress.so"'
+echo '  %command%'
 echo ""
-echo "2. Launch the game. You should see in the log:"
-echo "   [TexCompress] Native library loaded: ..."
-echo "   [TexCompress] Using format 0x83f0 (RGB) / 0x83f3 (RGBA)"
-echo "   [TexCompress] Agent installed — will compress textures on upload."
+echo "Step 3 — You should see in the log:"
+echo "  [TexCompress] Native library loaded: ..."
+echo "  [TexCompress] Patching glTexImage2D in com/badlogic/gdx/backends/lwjgl/LwjglGL20"
+echo "  [TexCompress] Using format 0x9274 (RGB) / 0x9278 (RGBA)"
