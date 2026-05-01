@@ -2,12 +2,14 @@ package com.texcompress;
 
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
+import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.security.ProtectionDomain;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -15,18 +17,13 @@ import org.objectweb.asm.Opcodes;
  * Java agent that intercepts libGDX's glTexImage2D calls and transparently
  * replaces them with glCompressedTexImage2D when a supported format is available.
  *
- * Usage (add to game launch options in Steam):
+ * Usage:
  *   -javaagent:/path/to/texcompress-agent.jar=native=/path/to/libtexcompress.so
- *
- * The agent patches the two libGDX GL20 backend classes that call glTexImage2D:
- *   com/badlogic/gdx/backends/lwjgl/LwjglGL20
- *   com/badlogic/gdx/backends/lwjgl3/Lwjgl3GL20    (if LWJGL3 backend present)
  */
 public class TextureCompressAgent {
 
-    /* Detected format cache — filled on first real texture upload */
-    static volatile int rgbFmt  = NativeCompressor.NONE;
-    static volatile int rgbaFmt = NativeCompressor.NONE;
+    static volatile int     rgbFmt         = NativeCompressor.NONE;
+    static volatile int     rgbaFmt        = NativeCompressor.NONE;
     static volatile boolean formatDetected = false;
 
     public static void premain(String args, Instrumentation inst) {
@@ -46,7 +43,6 @@ public class TextureCompressAgent {
             System.err.println("[TexCompress] Failed to load native lib: " + t);
             return;
         }
-
         inst.addTransformer(new GdxGL20Transformer(), true);
         System.out.println("[TexCompress] Agent installed — will compress textures on upload.");
     }
@@ -60,7 +56,6 @@ public class TextureCompressAgent {
         return null;
     }
 
-    /** Called lazily on the first glTexImage2D to detect GPU support. */
     static void ensureFormatDetected() {
         if (formatDetected) return;
         synchronized (TextureCompressAgent.class) {
@@ -78,47 +73,46 @@ public class TextureCompressAgent {
     }
 
     /**
-     * Intercept point called from the instrumented glTexImage2D.
-     * Returns true if the texture was uploaded as compressed (caller must skip original call).
+     * Called from patched glTexImage2D.
+     * LwjglGL20 declares the last param as java.nio.Buffer, so we accept Buffer
+     * and cast to ByteBuffer (libGDX always passes a ByteBuffer in practice).
+     * Returns true if compressed upload succeeded — caller should skip original call.
      */
     public static boolean tryCompressAndUpload(int target, int level, int internalFormat,
                                                 int width, int height, int border,
-                                                int format, int type, ByteBuffer pixels) {
+                                                int format, int type, Buffer pixels) {
         if (pixels == null || level != 0) return false;
+        if (!(pixels instanceof ByteBuffer)) return false;
 
         ensureFormatDetected();
 
-        /* Only compress base level, RGBA/RGB, UNSIGNED_BYTE sources */
         final int GL_UNSIGNED_BYTE = 0x1401;
-        final int GL_RGB  = 0x1907;
-        final int GL_RGBA = 0x1908;
+        final int GL_RGB           = 0x1907;
+        final int GL_RGBA          = 0x1908;
         if (type != GL_UNSIGNED_BYTE) return false;
-        boolean hasAlpha = (format == GL_RGBA);
         if (format != GL_RGB && format != GL_RGBA) return false;
 
+        boolean hasAlpha = (format == GL_RGBA);
         int compFmt = hasAlpha ? rgbaFmt : rgbFmt;
         if (compFmt == NativeCompressor.NONE) return false;
 
-        /* Width and height must be multiples of 4 for block compression */
+        ByteBuffer src = (ByteBuffer) pixels;
+        int expectedBytes = width * height * (hasAlpha ? 4 : 3);
+        if (src.remaining() < expectedBytes) return false;
+
+        /* Pad dimensions to 4-pixel block boundary if needed */
         int w = (width  + 3) & ~3;
         int h = (height + 3) & ~3;
-
-        /* If the buffer doesn't cover a padded size, pad it */
-        ByteBuffer src = pixels;
-        int expectedBytes = width * height * (hasAlpha ? 4 : 3);
-        if (pixels.remaining() < expectedBytes) return false;
-
         if (w != width || h != height) {
-            /* Rare: pad to block boundary in a new buffer */
-            int channels = hasAlpha ? 4 : 3;
-            ByteBuffer padded = ByteBuffer.allocateDirect(w * h * channels);
+            int ch = hasAlpha ? 4 : 3;
+            ByteBuffer padded = ByteBuffer.allocateDirect(w * h * ch);
+            int base = src.position();
             for (int row = 0; row < h; row++) {
-                int srcRow = Math.min(row, height - 1);
+                int sr = Math.min(row, height - 1);
                 for (int col = 0; col < w; col++) {
-                    int srcCol = Math.min(col, width - 1);
-                    int si = (srcRow * width + srcCol) * channels;
-                    for (int c = 0; c < channels; c++)
-                        padded.put(pixels.get(pixels.position() + si + c));
+                    int sc = Math.min(col, width - 1);
+                    int si = base + (sr * width + sc) * ch;
+                    for (int c = 0; c < ch; c++) padded.put(src.get(si + c));
                 }
             }
             padded.rewind();
@@ -128,40 +122,37 @@ public class TextureCompressAgent {
         int compSize = NativeCompressor.nGetCompressedSize(w, h, compFmt);
         ByteBuffer dst = ByteBuffer.allocateDirect(compSize);
         NativeCompressor.nCompress(src, dst, w, h, compFmt);
-
-        /* Call glCompressedTexImage2D directly via LWJGL */
         callCompressedTexImage2D(target, level, compFmt, width, height, border, compSize, dst);
         return true;
     }
 
-    /** Reflectively calls org.lwjgl.opengl.GL13.glCompressedTexImage2D */
     private static void callCompressedTexImage2D(int target, int level, int internalFormat,
                                                   int width, int height, int border,
                                                   int imageSize, ByteBuffer data) {
         try {
+            /* Try LWJGL 2 signature with explicit imageSize first */
             Class<?> gl13 = Class.forName("org.lwjgl.opengl.GL13");
-            gl13.getMethod("glCompressedTexImage2D",
-                    int.class, int.class, int.class, int.class, int.class,
-                    int.class, int.class, ByteBuffer.class)
-                .invoke(null, target, level, internalFormat, width, height,
-                        border, imageSize, data);
-        } catch (Exception e) {
-            /* Fallback: try without explicit imageSize (LWJGL 2 generated signature) */
             try {
-                Class<?> gl13 = Class.forName("org.lwjgl.opengl.GL13");
+                gl13.getMethod("glCompressedTexImage2D",
+                        int.class, int.class, int.class, int.class, int.class,
+                        int.class, int.class, ByteBuffer.class)
+                    .invoke(null, target, level, internalFormat,
+                            width, height, border, imageSize, data);
+            } catch (NoSuchMethodException e) {
+                /* LWJGL 2 generated variant — no explicit imageSize */
                 gl13.getMethod("glCompressedTexImage2D",
                         int.class, int.class, int.class, int.class, int.class,
                         int.class, ByteBuffer.class)
                     .invoke(null, target, level, internalFormat,
                             width, height, border, data);
-            } catch (Exception e2) {
-                System.err.println("[TexCompress] glCompressedTexImage2D call failed: " + e2);
             }
+        } catch (Exception e) {
+            System.err.println("[TexCompress] glCompressedTexImage2D call failed: " + e);
         }
     }
 
     /* -----------------------------------------------------------------------
-     * ASM transformer: patches glTexImage2D in libGDX's GL backend classes
+     * ASM transformer
      * ----------------------------------------------------------------------- */
 
     static class GdxGL20Transformer implements ClassFileTransformer {
@@ -177,16 +168,30 @@ public class TextureCompressAgent {
                                 ProtectionDomain domain, byte[] classBytes) {
             for (String target : TARGET_CLASSES) {
                 if (target.equals(className)) {
-                    return patchClass(classBytes, className);
+                    return patchClass(classBytes, className, loader);
                 }
             }
             return null;
         }
 
-        private byte[] patchClass(byte[] classBytes, String className) {
+        private byte[] patchClass(byte[] classBytes, String className, ClassLoader loader) {
             try {
-                ClassReader  cr = new ClassReader(classBytes);
-                ClassWriter  cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES);
+                ClassReader cr = new ClassReader(classBytes);
+
+                /* COMPUTE_FRAMES regenerates all stack map tables from scratch.
+                 * Override getCommonSuperClass to avoid ClassLoader failures
+                 * during agent premain before all classes are loaded. */
+                ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES) {
+                    @Override
+                    protected String getCommonSuperClass(String type1, String type2) {
+                        try {
+                            return super.getCommonSuperClass(type1, type2);
+                        } catch (Throwable t) {
+                            return "java/lang/Object";
+                        }
+                    }
+                };
+
                 ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
                     @Override
                     public MethodVisitor visitMethod(int access, String name, String desc,
@@ -199,7 +204,9 @@ public class TextureCompressAgent {
                         return mv;
                     }
                 };
-                cr.accept(cv, 0);
+
+                /* EXPAND_FRAMES so ASM sees full frame info before rewriting */
+                cr.accept(cv, ClassReader.EXPAND_FRAMES);
                 return cw.toByteArray();
             } catch (Throwable t) {
                 System.err.println("[TexCompress] Failed to patch " + className + ": " + t);
@@ -209,12 +216,18 @@ public class TextureCompressAgent {
     }
 
     /**
-     * Replaces the body of glTexImage2D with:
+     * Prepends glTexImage2D with:
      *
-     *   if (!TextureCompressAgent.tryCompressAndUpload(target,level,internalFormat,
-     *           width,height,border,format,type,pixels)) {
-     *       // original glTexImage2D native call
-     *   }
+     *   if (tryCompressAndUpload(target,level,...,pixels)) return;
+     *   // original method body
+     *
+     * Control flow (correct stackmap-safe pattern):
+     *   LOAD params
+     *   INVOKESTATIC tryCompressAndUpload  -> boolean on stack
+     *   IFEQ  fallthrough   // if false  -> jump to original body
+     *   RETURN              // if true   -> compressed, done
+     *   fallthrough:
+     *   ... original bytecode ...
      */
     static class TexImage2DInterceptor extends MethodVisitor {
 
@@ -225,50 +238,31 @@ public class TextureCompressAgent {
         @Override
         public void visitCode() {
             super.visitCode();
-            /* Push all parameters onto stack for our intercept method.
-             * glTexImage2D(int target, int level, int internalFormat,
-             *              int width, int height, int border,
-             *              int format, int type, ByteBuffer pixels)
-             * Local slots (instance method): 0=this, 1..9 = the above params */
-            mv.visitVarInsn(Opcodes.ILOAD, 1); // target
-            mv.visitVarInsn(Opcodes.ILOAD, 2); // level
-            mv.visitVarInsn(Opcodes.ILOAD, 3); // internalFormat
-            mv.visitVarInsn(Opcodes.ILOAD, 4); // width
-            mv.visitVarInsn(Opcodes.ILOAD, 5); // height
-            mv.visitVarInsn(Opcodes.ILOAD, 6); // border
-            mv.visitVarInsn(Opcodes.ILOAD, 7); // format
-            mv.visitVarInsn(Opcodes.ILOAD, 8); // type
-            mv.visitVarInsn(Opcodes.ALOAD, 9); // pixels (ByteBuffer)
+
+            /* glTexImage2D(int,int,int,int,int,int,int,int,Buffer)V
+             * slot 0=this  1=target  2=level  3=internalFormat
+             *      4=width 5=height  6=border 7=format  8=type  9=pixels */
+            mv.visitVarInsn(Opcodes.ILOAD, 1);
+            mv.visitVarInsn(Opcodes.ILOAD, 2);
+            mv.visitVarInsn(Opcodes.ILOAD, 3);
+            mv.visitVarInsn(Opcodes.ILOAD, 4);
+            mv.visitVarInsn(Opcodes.ILOAD, 5);
+            mv.visitVarInsn(Opcodes.ILOAD, 6);
+            mv.visitVarInsn(Opcodes.ILOAD, 7);
+            mv.visitVarInsn(Opcodes.ILOAD, 8);
+            mv.visitVarInsn(Opcodes.ALOAD, 9);
 
             mv.visitMethodInsn(Opcodes.INVOKESTATIC,
                     "com/texcompress/TextureCompressAgent",
                     "tryCompressAndUpload",
-                    "(IIIIIIIILjava/nio/ByteBuffer;)Z",
+                    "(IIIIIIIILjava/nio/Buffer;)Z",
                     false);
 
-            /* if tryCompressAndUpload returned true, skip the original call */
-            org.objectweb.asm.Label skipLabel = new org.objectweb.asm.Label();
-            mv.visitJumpInsn(Opcodes.IFNE, skipLabel);
-            /* fall through to original native call */
-
-            /* We need to store the skip target — visitMaxs/visitEnd will
-             * be emitted by the super visitor after our injected code.
-             * Store the label so visitInsn(RETURN) can place it. */
-            this.skipLabel = skipLabel;
-        }
-
-        private org.objectweb.asm.Label skipLabel = null;
-
-        @Override
-        public void visitInsn(int opcode) {
-            if (opcode == Opcodes.RETURN && skipLabel != null) {
-                super.visitInsn(opcode);
-                mv.visitLabel(skipLabel);
-                /* Method returns void, so just fall off here */
-                skipLabel = null;
-                return;
-            }
-            super.visitInsn(opcode);
+            /* IFEQ fallthrough: if result==0 (false) jump past RETURN */
+            Label fallthrough = new Label();
+            mv.visitJumpInsn(Opcodes.IFEQ, fallthrough);
+            mv.visitInsn(Opcodes.RETURN);   /* compression succeeded — skip original */
+            mv.visitLabel(fallthrough);     /* original body starts here */
         }
     }
 }
