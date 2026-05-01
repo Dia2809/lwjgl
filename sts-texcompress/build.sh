@@ -9,9 +9,10 @@ cd "$(dirname "$0")"
 
 # ---------- 1. Compile native library ----------
 echo "==> Compiling libtexcompress.so ..."
+JAVA_HOME_NATIVE=${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}
 gcc -O2 -shared -fPIC -std=c99 \
-    -I"$JAVA_HOME/include" \
-    -I"$JAVA_HOME/include/linux" \
+    -I"$JAVA_HOME_NATIVE/include" \
+    -I"$JAVA_HOME_NATIVE/include/linux" \
     native/texture_compress.c \
     -o libtexcompress.so \
     -ldl
@@ -20,11 +21,25 @@ echo "    OK: libtexcompress.so"
 # ---------- 2. Compile Java agent ----------
 echo "==> Compiling Java sources ..."
 
-# ASM is bundled with the LWJGL installation that ships with Slay the Spire.
-# Point ASM_JAR at whichever asm jar ships in the game's lib folder.
-# Common locations (adjust if needed):
+# Use Java 17 — must match the JVM that runs Slay the Spire.
+# Override by setting JAVA_HOME before calling this script.
+if [ -z "$JAVA_HOME" ]; then
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+fi
+JAVAC="$JAVA_HOME/bin/javac"
+JAR_CMD="$JAVA_HOME/bin/jar"
+if [ ! -x "$JAVAC" ]; then
+    echo "ERROR: javac not found at $JAVAC"
+    echo "       Install with: sudo apt install openjdk-17-jdk"
+    exit 1
+fi
+echo "    Using JDK: $JAVA_HOME"
+
+# ASM jar — search common locations
 ASM_JAR=""
 for candidate in \
+    ~/snap/steam/common/.local/share/Steam/steamapps/common/SlayTheSpire/lib/asm-all*.jar \
+    ~/snap/steam/common/.local/share/Steam/steamapps/common/SlayTheSpire/lib/asm*.jar \
     ~/.steam/steam/steamapps/common/SlayTheSpire/lib/asm-all*.jar \
     ~/.steam/steam/steamapps/common/SlayTheSpire/lib/asm*.jar \
     /usr/share/java/asm.jar \
@@ -36,16 +51,16 @@ for candidate in \
 done
 
 if [ -z "$ASM_JAR" ]; then
-    echo "ERROR: ASM jar not found. Set ASM_JAR manually or install: apt install libasm-java"
+    echo "ERROR: ASM jar not found. Install with: sudo apt install libasm-java"
     exit 1
 fi
 echo "    Using ASM: $ASM_JAR"
 
 mkdir -p build/classes
-javac -cp "$ASM_JAR" \
-      -d build/classes \
-      src/main/java/com/texcompress/NativeCompressor.java \
-      src/main/java/com/texcompress/TextureCompressAgent.java
+"$JAVAC" --release 17 -cp "$ASM_JAR" \
+         -d build/classes \
+         src/main/java/com/texcompress/NativeCompressor.java \
+         src/main/java/com/texcompress/TextureCompressAgent.java
 
 # ---------- 3. Package fat agent jar (bundle ASM so it is self-contained) ----------
 echo "==> Packaging texcompress-agent.jar (fat jar, ASM bundled) ..."
@@ -57,7 +72,7 @@ mkdir -p build/asm-extract
 # Copy only the org/objectweb/asm hierarchy — skip META-INF to avoid conflicts
 cp -rn build/asm-extract/org build/classes/ 2>/dev/null || true
 
-jar cfm texcompress-agent.jar build/classes/META-INF/MANIFEST.MF \
+"$JAR_CMD" cfm texcompress-agent.jar build/classes/META-INF/MANIFEST.MF \
     -C build/classes .
 
 echo ""
