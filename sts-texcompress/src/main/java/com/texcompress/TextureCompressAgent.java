@@ -115,7 +115,7 @@ public class TextureCompressAgent {
                 if (alpha == 0) transparent++;
                 sampled++;
             }
-            if (transparent > sampled * 40 / 100) return false;
+            if (transparent > sampled * 70 / 100) return false;
         }
 
         /* Pad dimensions to 4-pixel block boundary if needed */
