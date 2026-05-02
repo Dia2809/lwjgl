@@ -113,16 +113,28 @@ public class TextureCompressAgent {
          * transparent skip DXT5 — the texture is almost certainly a font
          * atlas and DXT5 would produce visible glyph artifacts. */
         if (hasAlpha) {
-            int total   = width * height;
-            int step    = Math.max(1, total / 2048);
-            int base    = src.position();
-            int sampled = 0, transparent = 0;
+            /* Detect font atlases by opaque pixel color.
+             * libGDX FreeType always renders white glyphs (the shader tints
+             * them at draw time). Card art / backgrounds have colorful opaque
+             * pixels. Sample up to 2048 evenly-spaced pixels, look only at
+             * opaque ones (alpha > 127), and skip DXT5 if >70% of them are
+             * near-white (R,G,B all > 200). */
+            int total      = width * height;
+            int step       = Math.max(1, total / 2048);
+            int base       = src.position();
+            int opaqueCount = 0, whiteCount = 0;
             for (int i = 0; i < total; i += step) {
-                int alpha = src.get(base + i * 4 + 3) & 0xFF;
-                if (alpha == 0) transparent++;
-                sampled++;
+                int idx   = base + i * 4;
+                int alpha = src.get(idx + 3) & 0xFF;
+                if (alpha > 127) {
+                    opaqueCount++;
+                    int r = src.get(idx)     & 0xFF;
+                    int g = src.get(idx + 1) & 0xFF;
+                    int b = src.get(idx + 2) & 0xFF;
+                    if (r > 200 && g > 200 && b > 200) whiteCount++;
+                }
             }
-            boolean skip = transparent > sampled * 70 / 100;
+            boolean skip = opaqueCount >= 10 && whiteCount > opaqueCount * 70 / 100;
             debugSaveTexture(src, width, height, true, skip);
             if (skip) return false;
         } else {
