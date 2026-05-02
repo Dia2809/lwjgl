@@ -96,17 +96,27 @@ public class TextureCompressAgent {
         int compFmt = hasAlpha ? rgbaFmt : rgbFmt;
         if (compFmt == NativeCompressor.NONE) return false;
 
-        /* Skip RGBA compression for small textures.
-         * Font atlases are generated at runtime by libGDX FreeType and can
-         * be any size up to ~512x512. DXT5 produces visible artifacts on
-         * them. Only compress RGBA textures >= 1 megapixel (1024x1024
-         * equivalent) — card atlases (2048x2048), backgrounds (1920x1136),
-         * and portraits (1024x1024) all exceed this, font atlases do not. */
-        if (hasAlpha && (long) width * height < 1024 * 1024) {
-            return false;
-        }
-
         ByteBuffer src = (ByteBuffer) pixels;
+
+        /* Skip RGBA compression for font atlases.
+         * Font atlases (FreeType-generated at runtime) are mostly empty:
+         * ~70-90% of pixels have alpha==0. Game art textures (card atlases,
+         * backgrounds, portraits) have very few fully-transparent pixels.
+         * Sample up to 2048 evenly-spaced pixels; if >40% are fully
+         * transparent skip DXT5 — the texture is almost certainly a font
+         * atlas and DXT5 would produce visible glyph artifacts. */
+        if (hasAlpha) {
+            int total   = width * height;
+            int step    = Math.max(1, total / 2048);
+            int base    = src.position();
+            int sampled = 0, transparent = 0;
+            for (int i = 0; i < total; i += step) {
+                int alpha = src.get(base + i * 4 + 3) & 0xFF;
+                if (alpha == 0) transparent++;
+                sampled++;
+            }
+            if (transparent > sampled * 40 / 100) return false;
+        }
 
         /* Pad dimensions to 4-pixel block boundary if needed */
         int w = (width  + 3) & ~3;
