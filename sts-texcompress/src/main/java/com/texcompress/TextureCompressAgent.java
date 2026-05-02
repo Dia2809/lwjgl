@@ -22,6 +22,18 @@ import org.objectweb.asm.Opcodes;
  */
 public class TextureCompressAgent {
 
+    static {
+        String dir = System.getenv("XDG_DATA_HOME");
+        if (dir == null) dir = "/mnt/mmc/ports/slaythespire";
+        String path = System.getProperty("texcompress.native", dir + "/libtexcompress.so");
+        try {
+            NativeCompressor.loadLibrary(path);
+            System.out.println("[TexCompress] Native library loaded: " + path);
+        } catch (Throwable t) {
+            System.err.println("[TexCompress] Failed to load native lib: " + t);
+        }
+    }
+
     static volatile int     rgbFmt         = NativeCompressor.NONE;
     static volatile int     rgbaFmt        = NativeCompressor.NONE;
     static volatile boolean formatDetected = false;
@@ -203,7 +215,7 @@ public class TextureCompressAgent {
             return null;
         }
 
-        private byte[] patchClass(byte[] classBytes, String className, ClassLoader loader) {
+        static byte[] patchClass(byte[] classBytes, String className, ClassLoader loader) {
             try {
                 ClassReader cr = new ClassReader(classBytes);
 
