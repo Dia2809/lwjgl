@@ -1,10 +1,14 @@
 package com.texcompress;
 
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.security.ProtectionDomain;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.imageio.ImageIO;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -25,6 +29,9 @@ public class TextureCompressAgent {
     static volatile int     rgbFmt         = NativeCompressor.NONE;
     static volatile int     rgbaFmt        = NativeCompressor.NONE;
     static volatile boolean formatDetected = false;
+
+    private static final String      DEBUG_DIR     = System.getProperty("texcompress.debug");
+    private static final AtomicInteger debugCounter = new AtomicInteger();
 
     public static void premain(String args, Instrumentation inst) {
         agentmain(args, inst);
@@ -115,7 +122,11 @@ public class TextureCompressAgent {
                 if (alpha == 0) transparent++;
                 sampled++;
             }
-            if (transparent > sampled * 70 / 100) return false;
+            boolean skip = transparent > sampled * 70 / 100;
+            debugSaveTexture(src, width, height, true, skip);
+            if (skip) return false;
+        } else {
+            debugSaveTexture(src, width, height, false, false);
         }
 
         /* Pad dimensions to 4-pixel block boundary if needed */
@@ -166,6 +177,35 @@ public class TextureCompressAgent {
             }
         } catch (Exception e) {
             System.err.println("[TexCompress] glCompressedTexImage2D call failed: " + e);
+        }
+    }
+
+    private static void debugSaveTexture(ByteBuffer src, int width, int height,
+                                          boolean hasAlpha, boolean skipped) {
+        if (DEBUG_DIR == null) return;
+        try {
+            File dir = new File(DEBUG_DIR);
+            dir.mkdirs();
+            int n = debugCounter.incrementAndGet();
+            String name = String.format("%s_%04d_%dx%d.png",
+                    skipped ? "SKIP" : "COMP", n, width, height);
+            int type = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
+            BufferedImage img = new BufferedImage(width, height, type);
+            int base = src.position();
+            int ch   = hasAlpha ? 4 : 3;
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int i = base + (y * width + x) * ch;
+                    int r = src.get(i)     & 0xFF;
+                    int g = src.get(i + 1) & 0xFF;
+                    int b = src.get(i + 2) & 0xFF;
+                    int a = hasAlpha ? (src.get(i + 3) & 0xFF) : 0xFF;
+                    img.setRGB(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+                }
+            }
+            ImageIO.write(img, "png", new File(dir, name));
+        } catch (Exception e) {
+            System.err.println("[TexCompress] debug save failed: " + e);
         }
     }
 
