@@ -96,11 +96,17 @@ public class TextureCompressAgent {
         int compFmt = hasAlpha ? rgbaFmt : rgbFmt;
         if (compFmt == NativeCompressor.NONE) return false;
 
-        ByteBuffer src = (ByteBuffer) pixels;
+        /* Skip small RGBA textures. The first textures loaded at startup
+         * (128x128 × 7 and 64x64 × 30) are font atlases and icon sheets.
+         * DXT5 produces visible artifacts on these because the font alpha
+         * channel has hard 0/255 edges and the DXT1 color block introduces
+         * colour errors on the tiny glyphs.  Large textures (512x512+) are
+         * card art and backgrounds where DXT5 quality is acceptable. */
+        if (hasAlpha && (width <= 128 || height <= 128)) {
+            return false;
+        }
 
-        int expectedBytes = width * height * (hasAlpha ? 4 : 3);
-        if (src.remaining() < expectedBytes) return false;
-        System.out.println("[TexCompress] " + (hasAlpha ? "RGBA" : "RGB ") + " " + width + "x" + height);
+        ByteBuffer src = (ByteBuffer) pixels;
 
         /* Pad dimensions to 4-pixel block boundary if needed */
         int w = (width  + 3) & ~3;
