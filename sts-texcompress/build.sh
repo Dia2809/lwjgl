@@ -64,7 +64,7 @@ fi
 echo "    Using ASM: $ASM_JAR"
 
 mkdir -p build/classes
-"$JAVAC" --release 17 -cp "$ASM_JAR" \
+"$JAVAC" --release 8 -cp "$ASM_JAR" \
          -d build/classes \
          src/main/java/com/texcompress/NativeCompressor.java \
          src/main/java/com/texcompress/TextureCompressAgent.java
