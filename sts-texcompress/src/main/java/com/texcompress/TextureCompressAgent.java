@@ -32,6 +32,9 @@ public class TextureCompressAgent {
 
     private static final String      DEBUG_DIR     = System.getProperty("texcompress.debug");
     private static final AtomicInteger debugCounter = new AtomicInteger();
+    /* texcompress.scale=2 halves each dimension before compressing (16x VRAM reduction for RGBA).
+     * texcompress.scale=4 quarters dimensions (64x reduction). Default=1 (no downscale). */
+    private static final int SCALE = Integer.getInteger("texcompress.scale", 1);
 
     public static void premain(String args, Instrumentation inst) {
         agentmain(args, inst);
@@ -121,18 +124,45 @@ public class TextureCompressAgent {
 
         debugSaveTexture(src, width, height, hasAlpha, false);
 
+        int ch = hasAlpha ? 4 : 3;
+
+        /* Optional box-filter downsample (texcompress.scale=2 or 4) */
+        int outW = width, outH = height;
+        if (SCALE > 1 && width >= SCALE * 4 && height >= SCALE * 4) {
+            outW = width  / SCALE;
+            outH = height / SCALE;
+            ByteBuffer down = ByteBuffer.allocateDirect(outW * outH * ch);
+            int base = src.position();
+            int s2 = SCALE * SCALE;
+            for (int row = 0; row < outH; row++) {
+                for (int col = 0; col < outW; col++) {
+                    int sum[] = new int[ch];
+                    for (int dy = 0; dy < SCALE; dy++) {
+                        int sy = Math.min(row * SCALE + dy, height - 1);
+                        for (int dx = 0; dx < SCALE; dx++) {
+                            int sx = Math.min(col * SCALE + dx, width - 1);
+                            int si = base + (sy * width + sx) * ch;
+                            for (int c = 0; c < ch; c++) sum[c] += src.get(si + c) & 0xFF;
+                        }
+                    }
+                    for (int c = 0; c < ch; c++) down.put((byte)(sum[c] / s2));
+                }
+            }
+            down.rewind();
+            src = down;
+        }
+
         /* Pad dimensions to 4-pixel block boundary if needed */
-        int w = (width  + 3) & ~3;
-        int h = (height + 3) & ~3;
-        if (w != width || h != height) {
-            int ch = hasAlpha ? 4 : 3;
+        int w = (outW + 3) & ~3;
+        int h = (outH + 3) & ~3;
+        if (w != outW || h != outH) {
             ByteBuffer padded = ByteBuffer.allocateDirect(w * h * ch);
             int base = src.position();
             for (int row = 0; row < h; row++) {
-                int sr = Math.min(row, height - 1);
+                int sr = Math.min(row, outH - 1);
                 for (int col = 0; col < w; col++) {
-                    int sc = Math.min(col, width - 1);
-                    int si = base + (sr * width + sc) * ch;
+                    int sc = Math.min(col, outW - 1);
+                    int si = base + (sr * outW + sc) * ch;
                     for (int c = 0; c < ch; c++) padded.put(src.get(si + c));
                 }
             }
@@ -143,7 +173,7 @@ public class TextureCompressAgent {
         int compSize = NativeCompressor.nGetCompressedSize(w, h, compFmt);
         ByteBuffer dst = ByteBuffer.allocateDirect(compSize);
         NativeCompressor.nCompress(src, dst, w, h, compFmt);
-        callCompressedTexImage2D(target, level, compFmt, width, height, border, compSize, dst);
+        callCompressedTexImage2D(target, level, compFmt, outW, outH, border, compSize, dst);
         return true;
     }
 
