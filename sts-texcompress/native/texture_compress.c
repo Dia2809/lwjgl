@@ -20,6 +20,7 @@
  */
 
 #include <jni.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
@@ -613,23 +614,39 @@ static int tc_is_gles3(void) {
 static int detect_format(int want_rgba) {
     tc_init_gl();
 
-    /* On a GLES3 context ETC2 is always available — no extension needed */
+    /* Log what the GL stack is reporting so the user can see which path is taken. */
+    if (!want_rgba && tc_glGetString) {
+        const char *ver = (const char *)tc_glGetString(0x1F02 /* GL_VERSION */);
+        const char *ren = (const char *)tc_glGetString(0x1F01 /* GL_RENDERER */);
+        fprintf(stderr, "[TexCompress] GL_VERSION:  %s\n", ver ? ver : "(null)");
+        fprintf(stderr, "[TexCompress] GL_RENDERER: %s\n", ren ? ren : "(null)");
+    }
+
+    /* GLES3 core — ETC2 is mandatory, no extension query needed. */
     if (tc_is_gles3()) {
         return want_rgba ? TC_GL_COMPRESSED_RGBA8_ETC2_EAC
                          : TC_GL_COMPRESSED_RGB8_ETC2;
     }
 
-    /* Desktop GL: prefer S3TC (DXT), fall back to ETC2 via compatibility ext */
+    /* ETC2 first — it is hardware-native on any GLES3 device.
+     * GL4ES (used on ARM handhelds) advertises GL_EXT_texture_compression_s3tc
+     * as a *software* fallback: it accepts DXT uploads but immediately
+     * decompresses them back to raw pixels, wasting both CPU and VRAM.
+     * Checking ETC2 before DXT ensures we use hardware compression on ARM. */
+    if (tc_has_extension("GL_ARB_ES3_compatibility") ||
+        tc_has_extension("GL_OES_compressed_ETC2_RGB8_texture") ||
+        tc_has_extension("GL_OES_compressed_ETC2_RGBA8_texture")) {
+        return want_rgba ? TC_GL_COMPRESSED_RGBA8_ETC2_EAC
+                         : TC_GL_COMPRESSED_RGB8_ETC2;
+    }
+
+    /* S3TC — hardware on desktop NVIDIA / AMD / Intel. */
     if (tc_has_extension("GL_EXT_texture_compression_s3tc") ||
         tc_has_extension("GL_NV_texture_compression_s3tc")) {
         return want_rgba ? TC_GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
                          : TC_GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
     }
-    if (tc_has_extension("GL_ARB_ES3_compatibility") ||
-        tc_has_extension("GL_OES_compressed_ETC2_RGB8_texture")) {
-        return want_rgba ? TC_GL_COMPRESSED_RGBA8_ETC2_EAC
-                         : TC_GL_COMPRESSED_RGB8_ETC2;
-    }
+
     return TC_FORMAT_NONE;
 }
 
