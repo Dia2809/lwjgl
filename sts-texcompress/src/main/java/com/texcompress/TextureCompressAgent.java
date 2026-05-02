@@ -113,28 +113,43 @@ public class TextureCompressAgent {
          * transparent skip DXT5 — the texture is almost certainly a font
          * atlas and DXT5 would produce visible glyph artifacts. */
         if (hasAlpha) {
-            /* Detect font atlases by opaque pixel color.
-             * libGDX FreeType always renders white glyphs (the shader tints
-             * them at draw time). Card art / backgrounds have colorful opaque
-             * pixels. Sample up to 2048 evenly-spaced pixels, look only at
-             * opaque ones (alpha > 127), and skip DXT5 if >70% of them are
-             * near-white (R,G,B all > 200). */
+            /* Detect font atlases: sparse (mostly transparent) AND uniform
+             * opaque-pixel color. libGDX FreeType glyphs are all the same
+             * color (white by default, but can be golden etc.) so variance
+             * across opaque pixels is near zero. Card art is also sparse
+             * (transparent background) but has wildly varying colors.
+             *
+             * Sample up to 2048 pixels. Among those with alpha > 127, compute
+             * per-channel variance. Skip DXT5 if < 35% are opaque AND max
+             * channel variance < 600 (scale 0–65025). */
             int total      = width * height;
             int step       = Math.max(1, total / 2048);
             int base       = src.position();
-            int opaqueCount = 0, whiteCount = 0;
+            int sampled    = 0, opaqueCount = 0;
+            long sR=0, sG=0, sB=0, sR2=0, sG2=0, sB2=0;
             for (int i = 0; i < total; i += step) {
                 int idx   = base + i * 4;
                 int alpha = src.get(idx + 3) & 0xFF;
+                sampled++;
                 if (alpha > 127) {
-                    opaqueCount++;
                     int r = src.get(idx)     & 0xFF;
                     int g = src.get(idx + 1) & 0xFF;
                     int b = src.get(idx + 2) & 0xFF;
-                    if (r > 200 && g > 200 && b > 200) whiteCount++;
+                    opaqueCount++;
+                    sR += r;  sG += g;  sB += b;
+                    sR2 += r*r; sG2 += g*g; sB2 += b*b;
                 }
             }
-            boolean skip = opaqueCount >= 10 && whiteCount > opaqueCount * 70 / 100;
+            boolean skip = false;
+            if (opaqueCount >= 10) {
+                boolean sparse = opaqueCount < sampled * 35 / 100;
+                long mR = sR/opaqueCount, mG = sG/opaqueCount, mB = sB/opaqueCount;
+                long varR = sR2/opaqueCount - mR*mR;
+                long varG = sG2/opaqueCount - mG*mG;
+                long varB = sB2/opaqueCount - mB*mB;
+                boolean uniformColor = Math.max(varR, Math.max(varG, varB)) < 600;
+                skip = sparse && uniformColor;
+            }
             debugSaveTexture(src, width, height, true, skip);
             if (skip) return false;
         } else {
