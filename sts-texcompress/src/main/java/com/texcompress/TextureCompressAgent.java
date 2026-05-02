@@ -38,6 +38,22 @@ public class TextureCompressAgent {
     static volatile int     rgbaFmt        = NativeCompressor.NONE;
     static volatile boolean formatDetected = false;
 
+    private static volatile int logCount = 0;
+    private static final int LOG_LIMIT = 20;
+
+    private static String fmtName(int fmt) {
+        switch (fmt) {
+            case 0x83F0: return "DXT1/BC1-RGB";
+            case 0x83F1: return "DXT1/BC1-RGBA";
+            case 0x83F2: return "DXT3/BC2";
+            case 0x83F3: return "DXT5/BC3";
+            case 0x9274: return "ETC2-RGB";
+            case 0x9278: return "ETC2-RGBA";
+            case 0x93B0: return "ASTC-4x4";
+            default:     return "0x" + Integer.toHexString(fmt);
+        }
+    }
+
     /* texcompress.scale=2 halves each dimension before compressing (16x VRAM reduction for RGBA).
      * texcompress.scale=4 quarters dimensions (64x reduction). Default=1 (no downscale). */
     private static final int SCALE = Integer.getInteger("texcompress.scale", 1);
@@ -163,13 +179,24 @@ public class TextureCompressAgent {
         int compSize = NativeCompressor.nGetCompressedSize(w, h, compFmt);
         ByteBuffer dst = ByteBuffer.allocateDirect(compSize);
         NativeCompressor.nCompress(src, dst, w, h, compFmt);
-        callCompressedTexImage2D(target, level, compFmt, outW, outH, border, compSize, dst);
+
+        boolean verbose = logCount < LOG_LIMIT;
+        if (verbose) {
+            int n = ++logCount;
+            String scaleNote = (SCALE > 1) ? " (downscaled from " + width + "x" + height + ")" : "";
+            System.out.println("[TexCompress] #" + n + " uploading " + outW + "x" + outH + scaleNote
+                    + " as " + fmtName(compFmt) + " (" + compSize + " bytes)");
+            if (n == LOG_LIMIT)
+                System.out.println("[TexCompress] (further uploads will be silent)");
+        }
+
+        callCompressedTexImage2D(target, level, compFmt, outW, outH, border, compSize, dst, verbose);
         return true;
     }
 
     private static void callCompressedTexImage2D(int target, int level, int internalFormat,
                                                   int width, int height, int border,
-                                                  int imageSize, ByteBuffer data) {
+                                                  int imageSize, ByteBuffer data, boolean verbose) {
         try {
             /* Agent classes are loaded by the bootstrap/system classloader and cannot
              * see application jars. Use the thread context classloader (set by the game)
@@ -179,12 +206,13 @@ public class TextureCompressAgent {
 
             /* Try LWJGL 2 GL13 first, then GL11 (some stripped builds move it there) */
             Class<?> glClass = null;
+            String foundIn = null;
             for (String name : new String[]{"org.lwjgl.opengl.GL13", "org.lwjgl.opengl.GL11"}) {
-                try { glClass = Class.forName(name, true, cl); break; }
+                try { glClass = Class.forName(name, true, cl); foundIn = name; break; }
                 catch (ClassNotFoundException ignored) {}
             }
             if (glClass == null) {
-                System.err.println("[TexCompress] glCompressedTexImage2D: GL13/GL11 not found in " + cl);
+                System.err.println("[TexCompress] glCompressedTexImage2D: GL13/GL11 not found via " + cl);
                 return;
             }
 
@@ -194,6 +222,7 @@ public class TextureCompressAgent {
                         int.class, int.class, ByteBuffer.class)
                     .invoke(null, target, level, internalFormat,
                             width, height, border, imageSize, data);
+                if (verbose) System.out.println("[TexCompress]   -> OK via " + foundIn + " (8-arg)");
             } catch (NoSuchMethodException e) {
                 /* LWJGL 2 generated variant — no explicit imageSize */
                 glClass.getMethod("glCompressedTexImage2D",
@@ -201,6 +230,7 @@ public class TextureCompressAgent {
                         int.class, ByteBuffer.class)
                     .invoke(null, target, level, internalFormat,
                             width, height, border, data);
+                if (verbose) System.out.println("[TexCompress]   -> OK via " + foundIn + " (7-arg)");
             }
         } catch (Exception e) {
             System.err.println("[TexCompress] glCompressedTexImage2D call failed: " + e);
