@@ -96,12 +96,13 @@ public class TextureCompressAgent {
         int compFmt = hasAlpha ? rgbaFmt : rgbFmt;
         if (compFmt == NativeCompressor.NONE) return false;
 
-        /* Skip small RGBA textures — font atlases and icon sheets.
-         * Font atlas textures have transparent backgrounds with hard-edged
-         * glyph shapes; DXT5 BC4 produces visible alpha artifacts on them.
-         * Card art and backgrounds are 512x512 and larger, where DXT5
-         * quality is acceptable and the VRAM savings are significant. */
-        if (hasAlpha && (width <= 256 || height <= 256)) {
+        /* Skip RGBA compression for small textures.
+         * Font atlases are generated at runtime by libGDX FreeType and can
+         * be any size up to ~512x512. DXT5 produces visible artifacts on
+         * them. Only compress RGBA textures >= 1 megapixel (1024x1024
+         * equivalent) — card atlases (2048x2048), backgrounds (1920x1136),
+         * and portraits (1024x1024) all exceed this, font atlases do not. */
+        if (hasAlpha && (long) width * height < 1024 * 1024) {
             return false;
         }
 
