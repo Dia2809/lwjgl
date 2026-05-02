@@ -1,14 +1,10 @@
 package com.texcompress;
 
-import java.awt.image.BufferedImage;
-import java.io.File;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.security.ProtectionDomain;
-import java.util.concurrent.atomic.AtomicInteger;
-import javax.imageio.ImageIO;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -30,8 +26,6 @@ public class TextureCompressAgent {
     static volatile int     rgbaFmt        = NativeCompressor.NONE;
     static volatile boolean formatDetected = false;
 
-    private static final String      DEBUG_DIR     = System.getProperty("texcompress.debug");
-    private static final AtomicInteger debugCounter = new AtomicInteger();
     /* texcompress.scale=2 halves each dimension before compressing (16x VRAM reduction for RGBA).
      * texcompress.scale=4 quarters dimensions (64x reduction). Default=1 (no downscale). */
     private static final int SCALE = Integer.getInteger("texcompress.scale", 1);
@@ -84,8 +78,6 @@ public class TextureCompressAgent {
 
     /**
      * Called from patched glTexImage2D.
-     * LwjglGL20 declares the last param as java.nio.Buffer, so we accept Buffer
-     * and cast to ByteBuffer (libGDX always passes a ByteBuffer in practice).
      * Returns true if compressed upload succeeded — caller should skip original call.
      */
     public static boolean tryCompressAndUpload(int target, int level, int internalFormat,
@@ -106,27 +98,13 @@ public class TextureCompressAgent {
         int compFmt = hasAlpha ? rgbaFmt : rgbFmt;
         if (compFmt == NativeCompressor.NONE) return false;
 
+        /* Skip 1024x1024 RGBA — libGDX FreeType font atlases use this size */
+        if (hasAlpha && width == 1024 && height == 1024) return false;
+
         ByteBuffer src = (ByteBuffer) pixels;
-
-        /* Skip RGBA compression for font atlases.
-         * Font atlases (FreeType-generated at runtime) are mostly empty:
-         * ~70-90% of pixels have alpha==0. Game art textures (card atlases,
-         * backgrounds, portraits) have very few fully-transparent pixels.
-         * Sample up to 2048 evenly-spaced pixels; if >40% are fully
-         * transparent skip DXT5 — the texture is almost certainly a font
-         * atlas and DXT5 would produce visible glyph artifacts. */
-        /* Skip 1024x1024 RGBA textures — font atlases are generated at this
-         * size by libGDX FreeType and DXT5 produces visible glyph artifacts. */
-        if (hasAlpha && width == 1024 && height == 1024) {
-            debugSaveTexture(src, width, height, true, true);
-            return false;
-        }
-
-        debugSaveTexture(src, width, height, hasAlpha, false);
-
         int ch = hasAlpha ? 4 : 3;
 
-        /* Optional box-filter downsample (texcompress.scale=2 or 4) */
+        /* Optional box-filter downsample (-Dtexcompress.scale=2 or 4) */
         int outW = width, outH = height;
         if (SCALE > 1 && width >= SCALE * 4 && height >= SCALE * 4) {
             outW = width  / SCALE;
@@ -136,7 +114,7 @@ public class TextureCompressAgent {
             int s2 = SCALE * SCALE;
             for (int row = 0; row < outH; row++) {
                 for (int col = 0; col < outW; col++) {
-                    int sum[] = new int[ch];
+                    int[] sum = new int[ch];
                     for (int dy = 0; dy < SCALE; dy++) {
                         int sy = Math.min(row * SCALE + dy, height - 1);
                         for (int dx = 0; dx < SCALE; dx++) {
@@ -199,35 +177,6 @@ public class TextureCompressAgent {
             }
         } catch (Exception e) {
             System.err.println("[TexCompress] glCompressedTexImage2D call failed: " + e);
-        }
-    }
-
-    private static void debugSaveTexture(ByteBuffer src, int width, int height,
-                                          boolean hasAlpha, boolean skipped) {
-        if (DEBUG_DIR == null) return;
-        try {
-            File dir = new File(DEBUG_DIR);
-            dir.mkdirs();
-            int n = debugCounter.incrementAndGet();
-            String name = String.format("%s_%04d_%dx%d.png",
-                    skipped ? "SKIP" : "COMP", n, width, height);
-            int type = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
-            BufferedImage img = new BufferedImage(width, height, type);
-            int base = src.position();
-            int ch   = hasAlpha ? 4 : 3;
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    int i = base + (y * width + x) * ch;
-                    int r = src.get(i)     & 0xFF;
-                    int g = src.get(i + 1) & 0xFF;
-                    int b = src.get(i + 2) & 0xFF;
-                    int a = hasAlpha ? (src.get(i + 3) & 0xFF) : 0xFF;
-                    img.setRGB(x, y, (a << 24) | (r << 16) | (g << 8) | b);
-                }
-            }
-            ImageIO.write(img, "png", new File(dir, name));
-        } catch (Exception e) {
-            System.err.println("[TexCompress] debug save failed: " + e);
         }
     }
 
@@ -300,14 +249,6 @@ public class TextureCompressAgent {
      *
      *   if (tryCompressAndUpload(target,level,...,pixels)) return;
      *   // original method body
-     *
-     * Control flow (correct stackmap-safe pattern):
-     *   LOAD params
-     *   INVOKESTATIC tryCompressAndUpload  -> boolean on stack
-     *   IFEQ  fallthrough   // if false  -> jump to original body
-     *   RETURN              // if true   -> compressed, done
-     *   fallthrough:
-     *   ... original bytecode ...
      */
     static class TexImage2DInterceptor extends MethodVisitor {
 
