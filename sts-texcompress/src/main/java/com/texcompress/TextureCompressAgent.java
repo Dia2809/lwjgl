@@ -112,47 +112,14 @@ public class TextureCompressAgent {
          * Sample up to 2048 evenly-spaced pixels; if >40% are fully
          * transparent skip DXT5 — the texture is almost certainly a font
          * atlas and DXT5 would produce visible glyph artifacts. */
-        if (hasAlpha) {
-            /* Detect font atlases by uniform opaque-pixel color.
-             * libGDX FreeType glyphs are all the same color (white by default,
-             * but the game can configure gold, etc.), so color variance across
-             * opaque pixels is near zero. Card art has wildly varying colors
-             * even when the atlas has a transparent background.
-             *
-             * Sample up to 2048 pixels. Among those with alpha > 127, compute
-             * per-channel variance and skip DXT5 if the max channel variance
-             * is < 600 (out of a maximum of 65025). No sparseness gate —
-             * fully-packed font atlas pages also have uniform glyph color. */
-            int total      = width * height;
-            int step       = Math.max(1, total / 2048);
-            int base       = src.position();
-            int opaqueCount = 0;
-            long sR=0, sG=0, sB=0, sR2=0, sG2=0, sB2=0;
-            for (int i = 0; i < total; i += step) {
-                int idx   = base + i * 4;
-                int alpha = src.get(idx + 3) & 0xFF;
-                if (alpha > 127) {
-                    int r = src.get(idx)     & 0xFF;
-                    int g = src.get(idx + 1) & 0xFF;
-                    int b = src.get(idx + 2) & 0xFF;
-                    opaqueCount++;
-                    sR += r;  sG += g;  sB += b;
-                    sR2 += r*r; sG2 += g*g; sB2 += b*b;
-                }
-            }
-            boolean skip = false;
-            if (opaqueCount >= 10) {
-                long mR = sR/opaqueCount, mG = sG/opaqueCount, mB = sB/opaqueCount;
-                long varR = sR2/opaqueCount - mR*mR;
-                long varG = sG2/opaqueCount - mG*mG;
-                long varB = sB2/opaqueCount - mB*mB;
-                skip = Math.max(varR, Math.max(varG, varB)) < 600;
-            }
-            debugSaveTexture(src, width, height, true, skip);
-            if (skip) return false;
-        } else {
-            debugSaveTexture(src, width, height, false, false);
+        /* Skip 1024x1024 RGBA textures — font atlases are generated at this
+         * size by libGDX FreeType and DXT5 produces visible glyph artifacts. */
+        if (hasAlpha && width == 1024 && height == 1024) {
+            debugSaveTexture(src, width, height, true, true);
+            return false;
         }
+
+        debugSaveTexture(src, width, height, hasAlpha, false);
 
         /* Pad dimensions to 4-pixel block boundary if needed */
         int w = (width  + 3) & ~3;
