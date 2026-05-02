@@ -171,17 +171,32 @@ public class TextureCompressAgent {
                                                   int width, int height, int border,
                                                   int imageSize, ByteBuffer data) {
         try {
-            /* Try LWJGL 2 signature with explicit imageSize first */
-            Class<?> gl13 = Class.forName("org.lwjgl.opengl.GL13");
+            /* Agent classes are loaded by the bootstrap/system classloader and cannot
+             * see application jars. Use the thread context classloader (set by the game)
+             * which has the full classpath including LWJGL. */
+            ClassLoader cl = Thread.currentThread().getContextClassLoader();
+            if (cl == null) cl = ClassLoader.getSystemClassLoader();
+
+            /* Try LWJGL 2 GL13 first, then GL11 (some stripped builds move it there) */
+            Class<?> glClass = null;
+            for (String name : new String[]{"org.lwjgl.opengl.GL13", "org.lwjgl.opengl.GL11"}) {
+                try { glClass = Class.forName(name, true, cl); break; }
+                catch (ClassNotFoundException ignored) {}
+            }
+            if (glClass == null) {
+                System.err.println("[TexCompress] glCompressedTexImage2D: GL13/GL11 not found in " + cl);
+                return;
+            }
+
             try {
-                gl13.getMethod("glCompressedTexImage2D",
+                glClass.getMethod("glCompressedTexImage2D",
                         int.class, int.class, int.class, int.class, int.class,
                         int.class, int.class, ByteBuffer.class)
                     .invoke(null, target, level, internalFormat,
                             width, height, border, imageSize, data);
             } catch (NoSuchMethodException e) {
                 /* LWJGL 2 generated variant — no explicit imageSize */
-                gl13.getMethod("glCompressedTexImage2D",
+                glClass.getMethod("glCompressedTexImage2D",
                         int.class, int.class, int.class, int.class, int.class,
                         int.class, ByteBuffer.class)
                     .invoke(null, target, level, internalFormat,
