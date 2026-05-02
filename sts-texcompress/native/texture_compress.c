@@ -611,6 +611,18 @@ static int tc_is_gles3(void) {
     return ver && strstr(ver, "OpenGL ES 3") != NULL;
 }
 
+/* Returns 1 if running under the GL4ES wrapper (which advertises DXT as a
+ * software fallback — uploading DXT decompresses back to raw pixels on upload,
+ * defeating the entire point of compression). */
+static int tc_is_gl4es(void) {
+    if (!tc_glGetString) return 0;
+    const char *ver = (const char *)tc_glGetString(0x1F02 /* GL_VERSION */);
+    const char *ren = (const char *)tc_glGetString(0x1F01 /* GL_RENDERER */);
+    return (ver && strstr(ver, "gl4es") != NULL) ||
+           (ren && strstr(ren, "gl4es") != NULL) ||
+           (ren && strstr(ren, "GL4ES") != NULL);
+}
+
 static int detect_format(int want_rgba) {
     tc_init_gl();
 
@@ -628,11 +640,15 @@ static int detect_format(int want_rgba) {
                          : TC_GL_COMPRESSED_RGB8_ETC2;
     }
 
-    /* ETC2 first — it is hardware-native on any GLES3 device.
-     * GL4ES (used on ARM handhelds) advertises GL_EXT_texture_compression_s3tc
-     * as a *software* fallback: it accepts DXT uploads but immediately
-     * decompresses them back to raw pixels, wasting both CPU and VRAM.
-     * Checking ETC2 before DXT ensures we use hardware compression on ARM. */
+    /* GL4ES wraps GLES3 hardware but doesn't forward ETC2 OES extensions.
+     * It does expose DXT as a software shim (decompresses on upload → wastes VRAM).
+     * The underlying hardware is always GLES3-capable, so ETC2 is safe to use. */
+    if (tc_is_gl4es()) {
+        return want_rgba ? TC_GL_COMPRESSED_RGBA8_ETC2_EAC
+                         : TC_GL_COMPRESSED_RGB8_ETC2;
+    }
+
+    /* ETC2 via explicit extension (desktop GL with ARB_ES3_compatibility, or GLES2+OES). */
     if (tc_has_extension("GL_ARB_ES3_compatibility") ||
         tc_has_extension("GL_OES_compressed_ETC2_RGB8_texture") ||
         tc_has_extension("GL_OES_compressed_ETC2_RGBA8_texture")) {
