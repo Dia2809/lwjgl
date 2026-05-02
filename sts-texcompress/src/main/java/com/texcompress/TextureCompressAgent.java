@@ -161,7 +161,40 @@ public class TextureCompressAgent {
         /* Pad dimensions to 4-pixel block boundary if needed */
         int w = (outW + 3) & ~3;
         int h = (outH + 3) & ~3;
-        if (w != outW || h != outH) {
+
+        /* If the RGBA texture is fully opaque, strip the alpha channel and
+         * compress as RGB (4 bpp) instead of RGBA (8 bpp) — zero quality loss. */
+        boolean strippedAlpha = false;
+        if (hasAlpha && rgbFmt != NativeCompressor.NONE) {
+            boolean allOpaque = true;
+            int base = src.position();
+            int pixelCount = outW * outH;
+            for (int i = 0; i < pixelCount; i++) {
+                if ((src.get(base + i * 4 + 3) & 0xFF) != 255) { allOpaque = false; break; }
+            }
+            if (allOpaque) {
+                ByteBuffer rgb = ByteBuffer.allocateDirect(w * h * 3);
+                for (int row = 0; row < h; row++) {
+                    int sr = Math.min(row, outH - 1);
+                    for (int col = 0; col < w; col++) {
+                        int sc = Math.min(col, outW - 1);
+                        int si = base + (sr * outW + sc) * 4;
+                        rgb.put(src.get(si)).put(src.get(si + 1)).put(src.get(si + 2));
+                    }
+                }
+                rgb.rewind();
+                src = rgb;
+                compFmt = rgbFmt;
+                ch = 3;
+                hasAlpha = false;
+                strippedAlpha = true;
+                /* src is already padded — skip the normal pad step below */
+                w = (outW + 3) & ~3;
+                h = (outH + 3) & ~3;
+            }
+        }
+
+        if (!strippedAlpha && (w != outW || h != outH)) {
             ByteBuffer padded = ByteBuffer.allocateDirect(w * h * ch);
             int base = src.position();
             for (int row = 0; row < h; row++) {
@@ -184,8 +217,9 @@ public class TextureCompressAgent {
         if (verbose) {
             int n = ++logCount;
             String scaleNote = (SCALE > 1) ? " (downscaled from " + width + "x" + height + ")" : "";
-            System.out.println("[TexCompress] #" + n + " uploading " + outW + "x" + outH + scaleNote
-                    + " as " + fmtName(compFmt) + " (" + compSize + " bytes)");
+            String alphaNote = strippedAlpha ? " (RGBA→RGB: all opaque)" : "";
+            System.out.println("[TexCompress] #" + n + " uploading " + outW + "x" + outH
+                    + scaleNote + alphaNote + " as " + fmtName(compFmt) + " (" + compSize + " bytes)");
             if (n == LOG_LIMIT)
                 System.out.println("[TexCompress] (further uploads will be silent)");
         }
