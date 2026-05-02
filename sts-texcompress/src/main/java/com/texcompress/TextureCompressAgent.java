@@ -98,20 +98,9 @@ public class TextureCompressAgent {
 
         ByteBuffer src = (ByteBuffer) pixels;
 
-        /* Skip all RGBA compression.
-         *
-         * Font/glyph atlases, sprites, and UI elements all have high-contrast
-         * alpha channels (0 and 255 in the same 4x4 block). Neither DXT5/BC4
-         * nor ETC2/EAC produce acceptable quality for these in practice.
-         *
-         * Only GL_RGB textures (backgrounds, environment art) are compressed.
-         * They still deliver meaningful VRAM savings with DXT1 (6x) or
-         * ETC2 RGB8 (6x). */
-        if (hasAlpha) {
-            return false;
-        }
         int expectedBytes = width * height * (hasAlpha ? 4 : 3);
         if (src.remaining() < expectedBytes) return false;
+        System.out.println("[TexCompress] " + (hasAlpha ? "RGBA" : "RGB ") + " " + width + "x" + height);
 
         /* Pad dimensions to 4-pixel block boundary if needed */
         int w = (width  + 3) & ~3;
