@@ -33,4 +33,6 @@ public final class NativeCompressor {
     /** Fills dst (pre-allocated direct ByteBuffer) with compressed pixel data from src. */
     public static native void nCompress(ByteBuffer src, ByteBuffer dst,
                                         int width, int height, int format);
+    /** xxHash64 of src[offset .. offset+length-1] with the given seed. */
+    public static native long nHash(ByteBuffer src, int offset, int length, long seed);
 }

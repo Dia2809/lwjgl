@@ -21,9 +21,60 @@
 
 #include <jni.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+
+/* ==========================================================================
+ * xxHash64 — fast 64-bit non-cryptographic hash (embedded, no dependency)
+ * ========================================================================== */
+#define XXH_P64_1 UINT64_C(0x9E3779B185EBCA87)
+#define XXH_P64_2 UINT64_C(0xC2B2AE3D27D4EB4F)
+#define XXH_P64_3 UINT64_C(0x165667B19E3779F9)
+#define XXH_P64_4 UINT64_C(0x85EBCA77C2B2AE63)
+#define XXH_P64_5 UINT64_C(0x27D4EB2F165667C5)
+
+static uint64_t xxh64_rotl(uint64_t v, int r) { return (v << r) | (v >> (64-r)); }
+static uint64_t xxh64_round(uint64_t acc, uint64_t in) {
+    return xxh64_rotl(acc + in * XXH_P64_2, 31) * XXH_P64_1;
+}
+static uint64_t xxh64_merge(uint64_t acc, uint64_t val) {
+    return xxh64_rotl(acc ^ xxh64_round(0, val), 27) * XXH_P64_1 + XXH_P64_4;
+}
+static uint64_t xxhash64(const void *data, size_t len, uint64_t seed) {
+    const uint8_t *p = (const uint8_t *)data;
+    const uint8_t *end = p + len;
+    uint64_t h;
+
+    if (len >= 32) {
+        uint64_t v1 = seed + XXH_P64_1 + XXH_P64_2;
+        uint64_t v2 = seed + XXH_P64_2;
+        uint64_t v3 = seed;
+        uint64_t v4 = seed - XXH_P64_1;
+        const uint8_t *lim = end - 32;
+        do {
+            uint64_t k;
+            memcpy(&k,p,8); v1=xxh64_round(v1,k); p+=8;
+            memcpy(&k,p,8); v2=xxh64_round(v2,k); p+=8;
+            memcpy(&k,p,8); v3=xxh64_round(v3,k); p+=8;
+            memcpy(&k,p,8); v4=xxh64_round(v4,k); p+=8;
+        } while (p <= lim);
+        h = xxh64_rotl(v1,1)+xxh64_rotl(v2,7)+xxh64_rotl(v3,12)+xxh64_rotl(v4,18);
+        h = xxh64_merge(h,v1); h = xxh64_merge(h,v2);
+        h = xxh64_merge(h,v3); h = xxh64_merge(h,v4);
+    } else {
+        h = seed + XXH_P64_5;
+    }
+    h += (uint64_t)len;
+    while (p+8 <= end) { uint64_t k; memcpy(&k,p,8);
+        h ^= xxh64_round(0,k); h = xxh64_rotl(h,27)*XXH_P64_1+XXH_P64_4; p+=8; }
+    if (p+4 <= end) { uint32_t k; memcpy(&k,p,4);
+        h ^= (uint64_t)k*XXH_P64_1; h = xxh64_rotl(h,23)*XXH_P64_2+XXH_P64_3; p+=4; }
+    while (p < end) { h ^= (*p)*XXH_P64_5; h = xxh64_rotl(h,11)*XXH_P64_1; p++; }
+    h ^= h>>33; h *= XXH_P64_2; h ^= h>>29; h *= XXH_P64_3; h ^= h>>32;
+    return h;
+}
 
 /* Grab GL function pointers at runtime from whatever GL/GLES lib is loaded */
 typedef const unsigned char *(*PFNGLGETSTRINGPROC)(unsigned int);
@@ -873,4 +924,18 @@ Java_com_texcompress_NativeCompressor_nCompress(
         default:
             break;
     }
+}
+
+/*
+ * nHash(ByteBuffer src, int offset, int length, long seed) -> long
+ * Returns xxHash64 of src[offset .. offset+length-1] with the given seed.
+ */
+JNIEXPORT jlong JNICALL
+Java_com_texcompress_NativeCompressor_nHash(
+        JNIEnv *env, jclass cls,
+        jobject buf, jint offset, jint length, jlong seed) {
+    const uint8_t *base = (const uint8_t *)(*env)->GetDirectBufferAddress(env, buf);
+    (void)cls;
+    if (!base) return 0;
+    return (jlong)xxhash64(base + offset, (size_t)length, (uint64_t)seed);
 }

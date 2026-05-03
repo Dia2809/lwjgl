@@ -60,6 +60,70 @@ public class TextureCompressAgent {
      * texcompress.scale=4 quarters dimensions (64x reduction). Default=1 (no downscale). */
     private static final int SCALE = Integer.getInteger("texcompress.scale", 1);
 
+    /* Bump this whenever compression output changes so stale cache files are ignored. */
+    private static final int CACHE_VERSION = 2;
+
+    private static final String CACHE_DIR;
+    static {
+        String d = System.getProperty("texcompress.cache");
+        if (d == null) {
+            String home = System.getenv("HOME");
+            if (home == null) home = System.getProperty("user.home", "/tmp");
+            d = home + "/.cache/sts-texcompress";
+        }
+        java.io.File dir = new java.io.File(d);
+        dir.mkdirs();
+        CACHE_DIR = dir.isDirectory() ? d : null;
+    }
+
+    private static ByteBuffer readCacheEntry(java.io.File f, int[] meta) {
+        /* meta: [0]=format, [1]=outW, [2]=outH */
+        try {
+            java.io.DataInputStream in = new java.io.DataInputStream(
+                    new java.io.BufferedInputStream(new java.io.FileInputStream(f)));
+            try {
+                if (in.readInt() != 0x54455843) return null; /* magic TEXC */
+                if (in.readInt() != CACHE_VERSION) return null;
+                meta[0] = in.readInt(); /* format */
+                meta[1] = in.readInt(); /* outW   */
+                meta[2] = in.readInt(); /* outH   */
+                int size = in.readInt();
+                if (size <= 0 || size > 64 * 1024 * 1024) return null;
+                byte[] bytes = new byte[size];
+                in.readFully(bytes);
+                ByteBuffer buf = ByteBuffer.allocateDirect(size);
+                buf.put(bytes);
+                buf.rewind();
+                return buf;
+            } finally { in.close(); }
+        } catch (Throwable t) { return null; }
+    }
+
+    private static void writeCacheEntry(java.io.File f, int format, int outW, int outH,
+                                         ByteBuffer data) {
+        try {
+            java.io.File tmp = new java.io.File(f.getPath() + ".tmp");
+            int size = data.remaining();
+            byte[] bytes = new byte[size];
+            int pos = data.position();
+            data.get(bytes); data.position(pos); /* non-destructive read */
+            java.io.DataOutputStream out = new java.io.DataOutputStream(
+                    new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmp)));
+            try {
+                out.writeInt(0x54455843); /* TEXC */
+                out.writeInt(CACHE_VERSION);
+                out.writeInt(format);
+                out.writeInt(outW);
+                out.writeInt(outH);
+                out.writeInt(size);
+                out.write(bytes);
+            } finally { out.close(); }
+            if (!tmp.renameTo(f)) tmp.delete(); /* atomic swap; clean up on failure */
+        } catch (Throwable t) {
+            System.err.println("[TexCompress] Cache write failed: " + t);
+        }
+    }
+
     public static void premain(String args, Instrumentation inst) {
         agentmain(args, inst);
     }
@@ -79,6 +143,8 @@ public class TextureCompressAgent {
         }
         inst.addTransformer(new GdxGL20Transformer(), true);
         System.out.println("[TexCompress] Agent installed — will compress textures on upload.");
+        System.out.println("[TexCompress] Cache dir: "
+                + (CACHE_DIR != null ? CACHE_DIR : "(disabled — cache dir not writable)"));
     }
 
     private static String parseNativePath(String args) {
@@ -153,8 +219,35 @@ public class TextureCompressAgent {
             if (total == 0 || grey * 100 / total >= 95) return false;
         }
 
-        ByteBuffer src = (ByteBuffer) pixels;
         int ch = hasAlpha ? 4 : 3;
+
+        /* --- Disk cache lookup --- */
+        java.io.File cacheFile = null;
+        if (CACHE_DIR != null && NativeCompressor.isLoaded()) {
+            try {
+                ByteBuffer pixBuf = (ByteBuffer) pixels;
+                long seed = ((long)CACHE_VERSION << 48) | ((long)SCALE << 32);
+                long hash = NativeCompressor.nHash(pixBuf, pixBuf.position(),
+                        width * height * ch, seed);
+                cacheFile = new java.io.File(CACHE_DIR,
+                        String.format("%016x.tex", hash));
+                if (cacheFile.isFile()) {
+                    int[] meta = new int[3];
+                    ByteBuffer cached = readCacheEntry(cacheFile, meta);
+                    if (cached != null) {
+                        boolean v = logCount < LOG_LIMIT;
+                        if (v) System.out.println("[TexCompress] #" + (++logCount)
+                                + " " + width + "x" + height + " CACHE HIT → "
+                                + fmtName(meta[0]));
+                        callCompressedTexImage2D(target, level, meta[0],
+                                meta[1], meta[2], border, cached.remaining(), cached, v);
+                        return true;
+                    }
+                }
+            } catch (Throwable t) { /* non-fatal — fall through to compress */ }
+        }
+
+        ByteBuffer src = (ByteBuffer) pixels;
 
         /* Optional box-filter downsample (-Dtexcompress.scale=2 or 4) */
         int outW = width, outH = height;
@@ -252,6 +345,9 @@ public class TextureCompressAgent {
         int compSize = NativeCompressor.nGetCompressedSize(w, h, compFmt);
         ByteBuffer dst = ByteBuffer.allocateDirect(compSize);
         NativeCompressor.nCompress(src, dst, w, h, compFmt);
+        dst.rewind();
+
+        if (cacheFile != null) writeCacheEntry(cacheFile, compFmt, outW, outH, dst);
 
         boolean verbose = logCount < LOG_LIMIT;
         if (verbose) {
