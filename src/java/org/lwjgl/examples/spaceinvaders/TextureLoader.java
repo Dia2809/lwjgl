@@ -55,6 +55,7 @@ import javax.swing.ImageIcon;
 import org.lwjgl.BufferUtils;
 
 import static org.lwjgl.opengl.GL11.*;
+import static org.lwjgl.opengl.GL13.*;
 
 /**
  * A utility class to load textures for OpenGL. This source is based
@@ -81,6 +82,13 @@ public class TextureLoader {
 
     /** Scratch buffer for texture ID's */
     private IntBuffer textureIDBuffer = BufferUtils.createIntBuffer(1);
+
+    /** Lazy-initialise the compressor once the GL context exists. */
+    private static void ensureCompressor() {
+        if (!TextureCompressor.isSupported()) {
+            TextureCompressor.init();
+        }
+    }
 
     /**
      * Create a new texture loader based on the game panel
@@ -180,16 +188,21 @@ public class TextureLoader {
             glTexParameteri(target, GL_TEXTURE_MAG_FILTER, magFilter);
         }
 
-        // produce a texture from the byte buffer
-        glTexImage2D(target,
-                      0,
-                      dstPixelFormat,
-                      get2Fold(bufferedImage.getWidth()),
-                      get2Fold(bufferedImage.getHeight()),
-                      0,
-                      srcPixelFormat,
-                      GL_UNSIGNED_BYTE,
-                      textureBuffer );
+        int texWidth  = get2Fold(bufferedImage.getWidth());
+        int texHeight = get2Fold(bufferedImage.getHeight());
+        boolean hasAlpha = bufferedImage.getColorModel().hasAlpha();
+
+        // Try on-the-fly compression to save VRAM (DXT1/DXT5 or ETC2).
+        ensureCompressor();
+        ByteBuffer compressed = TextureCompressor.compress(textureBuffer, texWidth, texHeight, hasAlpha);
+        if (compressed != null) {
+            int compFmt = hasAlpha ? TextureCompressor.getRGBAFormat()
+                                   : TextureCompressor.getRGBFormat();
+            glCompressedTexImage2D(target, 0, compFmt, texWidth, texHeight, 0, compressed);
+        } else {
+            glTexImage2D(target, 0, dstPixelFormat, texWidth, texHeight,
+                         0, srcPixelFormat, GL_UNSIGNED_BYTE, textureBuffer);
+        }
 
         return texture;
     }
