@@ -36,6 +36,7 @@ public class TextureCompressAgent {
 
     static volatile int     rgbFmt         = NativeCompressor.NONE;
     static volatile int     rgbaFmt        = NativeCompressor.NONE;
+    static volatile int     punchFmt       = NativeCompressor.NONE;
     static volatile boolean formatDetected = false;
 
     private static volatile int logCount = 0;
@@ -48,6 +49,7 @@ public class TextureCompressAgent {
             case 0x83F2: return "DXT3/BC2";
             case 0x83F3: return "DXT5/BC3";
             case 0x9274: return "ETC2-RGB";
+            case 0x9276: return "ETC2-PUNCH";
             case 0x9278: return "ETC2-RGBA";
             case 0x93B0: return "ASTC-4x4";
             default:     return "0x" + Integer.toHexString(fmt);
@@ -94,10 +96,15 @@ public class TextureCompressAgent {
             if (formatDetected) return;
             rgbFmt  = NativeCompressor.nDetectFormat(false);
             rgbaFmt = NativeCompressor.nDetectFormat(true);
+            /* Punch-through is available wherever ETC2 is (same GLES3 mandatory set).
+             * For DXT we skip punch-through (no DXT punch-through format exists). */
+            if (rgbaFmt == NativeCompressor.GL_COMPRESSED_RGBA8_ETC2_EAC)
+                punchFmt = NativeCompressor.GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2;
             formatDetected = true;
             if (rgbFmt != NativeCompressor.NONE) {
+                String punch = punchFmt != NativeCompressor.NONE ? " + punch-through" : "";
                 System.out.println("[TexCompress] Using format 0x" + Integer.toHexString(rgbFmt)
-                        + " (RGB) / 0x" + Integer.toHexString(rgbaFmt) + " (RGBA)");
+                        + " (RGB) / 0x" + Integer.toHexString(rgbaFmt) + " (RGBA)" + punch);
             } else {
                 System.out.println("[TexCompress] No compressed format available — passthrough.");
             }
@@ -126,8 +133,25 @@ public class TextureCompressAgent {
         int compFmt = hasAlpha ? rgbaFmt : rgbFmt;
         if (compFmt == NativeCompressor.NONE) return false;
 
-        /* Skip 1024x1024 RGBA — libGDX FreeType font atlases use this size */
-        if (hasAlpha && width == 1024 && height == 1024) return false;
+        /* Skip font atlases: libGDX FreeType generates RGBA textures where every
+         * non-transparent pixel is greyscale (R=G=B — pure white glyph, alpha varies).
+         * Real game textures have colour. Sample every 8th pixel for speed. */
+        if (hasAlpha && width == height) {
+            ByteBuffer probe = (ByteBuffer) pixels;
+            int base = probe.position();
+            int total = 0, grey = 0;
+            for (int i = 0; i < width * height; i += 8) {
+                int a = probe.get(base + i * 4 + 3) & 0xFF;
+                if (a < 16) continue; /* transparent pixels carry no colour info */
+                total++;
+                int r = probe.get(base + i * 4    ) & 0xFF;
+                int g = probe.get(base + i * 4 + 1) & 0xFF;
+                int b = probe.get(base + i * 4 + 2) & 0xFF;
+                if (Math.abs(r - g) <= 8 && Math.abs(g - b) <= 8) grey++;
+            }
+            /* >95 % greyscale non-transparent pixels → font atlas → skip */
+            if (total == 0 || grey * 100 / total >= 95) return false;
+        }
 
         ByteBuffer src = (ByteBuffer) pixels;
         int ch = hasAlpha ? 4 : 3;
@@ -162,10 +186,26 @@ public class TextureCompressAgent {
         int w = (outW + 3) & ~3;
         int h = (outH + 3) & ~3;
 
+        /* Upgrade RGBA→punch-through (4 bpp) when alpha is binary (0 or 255 only).
+         * Sprites with hard-edged transparency qualify; gradients do not. */
+        if (hasAlpha && punchFmt != NativeCompressor.NONE) {
+            int base = src.position();
+            boolean binary = true;
+            boolean hasTransparent = false;
+            for (int i = 0; i < outW * outH; i++) {
+                int a = src.get(base + i * 4 + 3) & 0xFF;
+                if (a != 0 && a != 255) { binary = false; break; }
+                if (a == 0) hasTransparent = true;
+            }
+            if (binary && hasTransparent) {
+                compFmt = punchFmt;
+            }
+        }
+
         /* If the RGBA texture is fully opaque, strip the alpha channel and
          * compress as RGB (4 bpp) instead of RGBA (8 bpp) — zero quality loss. */
         boolean strippedAlpha = false;
-        if (hasAlpha && rgbFmt != NativeCompressor.NONE) {
+        if (hasAlpha && compFmt == rgbaFmt && rgbFmt != NativeCompressor.NONE) {
             boolean allOpaque = true;
             int base = src.position();
             int pixelCount = outW * outH;
@@ -217,7 +257,8 @@ public class TextureCompressAgent {
         if (verbose) {
             int n = ++logCount;
             String scaleNote = (SCALE > 1) ? " (downscaled from " + width + "x" + height + ")" : "";
-            String alphaNote = strippedAlpha ? " (RGBA→RGB: all opaque)" : "";
+            String alphaNote = strippedAlpha ? " (RGBA→RGB: all opaque)"
+                             : compFmt == punchFmt ? " (RGBA→PUNCH: binary alpha)" : "";
             System.out.println("[TexCompress] #" + n + " uploading " + outW + "x" + outH
                     + scaleNote + alphaNote + " as " + fmtName(compFmt) + " (" + compSize + " bytes)");
             if (n == LOG_LIMIT)

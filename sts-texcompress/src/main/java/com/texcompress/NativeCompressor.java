@@ -8,11 +8,12 @@ import java.nio.ByteBuffer;
  */
 public final class NativeCompressor {
 
-    public static final int NONE                              = -1;
-    public static final int GL_COMPRESSED_RGB_S3TC_DXT1_EXT  = 0x83F0;
-    public static final int GL_COMPRESSED_RGBA_S3TC_DXT5_EXT = 0x83F3;
-    public static final int GL_COMPRESSED_RGB8_ETC2           = 0x9274;
-    public static final int GL_COMPRESSED_RGBA8_ETC2_EAC      = 0x9278;
+    public static final int NONE                                          = -1;
+    public static final int GL_COMPRESSED_RGB_S3TC_DXT1_EXT              = 0x83F0;
+    public static final int GL_COMPRESSED_RGBA_S3TC_DXT5_EXT             = 0x83F3;
+    public static final int GL_COMPRESSED_RGB8_ETC2                      = 0x9274;
+    public static final int GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2  = 0x9276;
+    public static final int GL_COMPRESSED_RGBA8_ETC2_EAC                 = 0x9278;
 
     private static volatile boolean loaded = false;
 

@@ -51,11 +51,12 @@ static void tc_init_gl(void) {
 #define GL_EXTENSIONS 0x1F03
 #endif
 
-#define TC_GL_COMPRESSED_RGB_S3TC_DXT1_EXT   0x83F0
-#define TC_GL_COMPRESSED_RGBA_S3TC_DXT5_EXT  0x83F3
-#define TC_GL_COMPRESSED_RGB8_ETC2            0x9274
-#define TC_GL_COMPRESSED_RGBA8_ETC2_EAC       0x9278
-#define TC_FORMAT_NONE                        -1
+#define TC_GL_COMPRESSED_RGB_S3TC_DXT1_EXT                0x83F0
+#define TC_GL_COMPRESSED_RGBA_S3TC_DXT5_EXT               0x83F3
+#define TC_GL_COMPRESSED_RGB8_ETC2                         0x9274
+#define TC_GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2     0x9276
+#define TC_GL_COMPRESSED_RGBA8_ETC2_EAC                    0x9278
+#define TC_FORMAT_NONE                                     -1
 
 /* --------------------------------------------------------------------------
  * Helpers
@@ -579,6 +580,150 @@ static void compress_etc2_rgba(const unsigned char *src, int w, int h,
 }
 
 /* ==========================================================================
+ * ETC2 RGB8 punch-through alpha – 4 bits/pixel
+ *
+ * Same block layout as ETC2 RGB8 (8 bytes, individual mode, diff=0, flip=0).
+ * The GPU interprets the format differently: pixel index 2 → transparent.
+ * Modifier mapping (differs from opaque ETC2!):
+ *   (MSB=0,LSB=0) idx 0 → base + large_modifier
+ *   (MSB=0,LSB=1) idx 1 → base + small_modifier
+ *   (MSB=1,LSB=0) idx 2 → TRANSPARENT
+ *   (MSB=1,LSB=1) idx 3 → base - small_modifier
+ * ========================================================================== */
+
+static void encode_etc2_punchthrough_block(unsigned char *out,
+        const int r[16], const int g[16], const int b[16], const int a[16]) {
+    int p, t;
+    int er0, eg0, eb0, er1, eg1, eb1;
+    int r0, g0, b0, r1, g1, b1;
+    int table0, table1;
+    int best_err, err;
+    unsigned int msb = 0, lsb = 0;
+
+    /* Average base colour from opaque pixels only, per sub-block */
+    {
+        int sr = 0, sg = 0, sb = 0, cnt = 0;
+        for (p = 0; p < 8; p++) {
+            int ap = etc_to_array(p);
+            if (a[ap]) { sr += r[ap]; sg += g[ap]; sb += b[ap]; cnt++; }
+        }
+        if (cnt) { er0 = sr/cnt; eg0 = sg/cnt; eb0 = sb/cnt; }
+        else { er0 = eg0 = eb0 = 0; }
+    }
+    {
+        int sr = 0, sg = 0, sb = 0, cnt = 0;
+        for (p = 8; p < 16; p++) {
+            int ap = etc_to_array(p);
+            if (a[ap]) { sr += r[ap]; sg += g[ap]; sb += b[ap]; cnt++; }
+        }
+        if (cnt) { er1 = sr/cnt; eg1 = sg/cnt; eb1 = sb/cnt; }
+        else { er1 = eg1 = eb1 = 0; }
+    }
+
+    /* Quantise to 4-bit and expand back */
+    r0 = er0>>4; g0 = eg0>>4; b0 = eb0>>4;
+    r1 = er1>>4; g1 = eg1>>4; b1 = eb1>>4;
+    er0=(r0<<4)|r0; eg0=(g0<<4)|g0; eb0=(b0<<4)|b0;
+    er1=(r1<<4)|r1; eg1=(g1<<4)|g1; eb1=(b1<<4)|b1;
+
+    /* Best modifier table for each sub-block (opaque pixels only, 3 mods) */
+    table0 = 0; best_err = 0x7FFFFFFF;
+    for (t = 0; t < 8; t++) {
+        err = 0;
+        for (p = 0; p < 8; p++) {
+            int ap = etc_to_array(p), j;
+            int min_pe = 0x7FFFFFFF;
+            if (!a[ap]) continue;
+            /* indices 0(+large), 1(+small), 3(-small) */
+            for (j = 0; j < 3; j++) {
+                int m  = j==0 ? ETC_MOD[t][1] : j==1 ? ETC_MOD[t][0] : -ETC_MOD[t][0];
+                int dr = r[ap]-tc_clamp(er0+m), dg = g[ap]-tc_clamp(eg0+m), db = b[ap]-tc_clamp(eb0+m);
+                int e  = dr*dr+dg*dg+db*db;
+                if (e < min_pe) min_pe = e;
+            }
+            err += min_pe;
+        }
+        if (err < best_err) { best_err = err; table0 = t; }
+    }
+
+    table1 = 0; best_err = 0x7FFFFFFF;
+    for (t = 0; t < 8; t++) {
+        err = 0;
+        for (p = 8; p < 16; p++) {
+            int ap = etc_to_array(p), j;
+            int min_pe = 0x7FFFFFFF;
+            if (!a[ap]) continue;
+            for (j = 0; j < 3; j++) {
+                int m  = j==0 ? ETC_MOD[t][1] : j==1 ? ETC_MOD[t][0] : -ETC_MOD[t][0];
+                int dr = r[ap]-tc_clamp(er1+m), dg = g[ap]-tc_clamp(eg1+m), db = b[ap]-tc_clamp(eb1+m);
+                int e  = dr*dr+dg*dg+db*db;
+                if (e < min_pe) min_pe = e;
+            }
+            err += min_pe;
+        }
+        if (err < best_err) { best_err = err; table1 = t; }
+    }
+
+    /* Header — individual mode (diff=0), flip=0, opaque=0 */
+    out[0] = (unsigned char)((r0<<4)|r1);
+    out[1] = (unsigned char)((g0<<4)|g1);
+    out[2] = (unsigned char)((b0<<4)|b1);
+    out[3] = (unsigned char)((table0<<5)|(table1<<2)); /* diff=0, flip=0 */
+
+    /* Pixel indices */
+    for (p = 0; p < 16; p++) {
+        int ap  = etc_to_array(p);
+        int shift = 15 - p;
+
+        if (!a[ap]) {
+            msb |= (1u << shift); /* transparent: (MSB=1, LSB=0) */
+            continue;
+        }
+        {
+            int er  = (p < 8) ? er0 : er1;
+            int eg  = (p < 8) ? eg0 : eg1;
+            int eb  = (p < 8) ? eb0 : eb1;
+            int tab = (p < 8) ? table0 : table1;
+            int best_idx = 0, j;
+            best_err = 0x7FFFFFFF;
+            for (j = 0; j < 3; j++) {
+                int m  = j==0 ? ETC_MOD[tab][1] : j==1 ? ETC_MOD[tab][0] : -ETC_MOD[tab][0];
+                int dr = r[ap]-tc_clamp(er+m), dg = g[ap]-tc_clamp(eg+m), db = b[ap]-tc_clamp(eb+m);
+                int e  = dr*dr+dg*dg+db*db;
+                if (e < best_err) { best_err = e; best_idx = j; }
+            }
+            /* idx 0 (+large): MSB=0,LSB=0 — no bits set */
+            if (best_idx == 1) lsb |= (1u << shift);          /* +small */
+            else if (best_idx == 2) { msb |= (1u << shift); lsb |= (1u << shift); } /* -small */
+        }
+    }
+
+    out[4] = (unsigned char)(msb >> 8);  out[5] = (unsigned char)(msb & 0xFF);
+    out[6] = (unsigned char)(lsb >> 8);  out[7] = (unsigned char)(lsb & 0xFF);
+}
+
+static void compress_etc2_punchthrough(const unsigned char *src, int w, int h,
+                                        unsigned char *out) {
+    int bx, by, px, py;
+    int bw = (w+3)/4, bh = (h+3)/4;
+    for (by = 0; by < bh; by++) {
+        for (bx = 0; bx < bw; bx++) {
+            int r[16], g[16], b[16], a[16];
+            for (py = 0; py < 4; py++) {
+                int sy = by*4+py < h ? by*4+py : h-1;
+                for (px = 0; px < 4; px++) {
+                    int sx  = bx*4+px < w ? bx*4+px : w-1;
+                    int off = (sy*w+sx)*4, i = py*4+px;
+                    r[i]=src[off]; g[i]=src[off+1]; b[i]=src[off+2]; a[i]=src[off+3];
+                }
+            }
+            encode_etc2_punchthrough_block(out, r, g, b, a);
+            out += 8;
+        }
+    }
+}
+
+/* ==========================================================================
  * Format detection
  * ========================================================================== */
 
@@ -687,7 +832,7 @@ Java_com_texcompress_NativeCompressor_nGetCompressedSize(
     if (format == TC_GL_COMPRESSED_RGBA_S3TC_DXT5_EXT ||
         format == TC_GL_COMPRESSED_RGBA8_ETC2_EAC)
         return bw * bh * 16;
-    return bw * bh * 8;
+    return bw * bh * 8; /* DXT1, ETC2 RGB, ETC2 punchthrough: all 8 bytes/block */
 }
 
 /*
@@ -721,6 +866,9 @@ Java_com_texcompress_NativeCompressor_nCompress(
             break;
         case TC_GL_COMPRESSED_RGBA8_ETC2_EAC:
             compress_etc2_rgba(src, width, height, dst);
+            break;
+        case TC_GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+            compress_etc2_punchthrough(src, width, height, dst);
             break;
         default:
             break;
